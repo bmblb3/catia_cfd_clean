@@ -4,13 +4,16 @@ namespace CATIA_CFD_Clean;
 
 internal sealed class MainForm : Form
 {
-    private object? _body1;
-    private object? _body2;
+    private readonly object?[] _bodies = new object?[3]; // index 1 and 2 used
+    private readonly object?[] _seals = new object?[3];  // index 1 and 2 used
+    private object? _sealResult;                         // the green intersected "Seal" body
+
+    private readonly Button _makeSeal;
 
     private readonly Label _status = new()
     {
         Dock = DockStyle.Bottom,
-        Height = 40,
+        Height = 48,
         TextAlign = ContentAlignment.MiddleLeft,
         Padding = new Padding(8, 0, 8, 0),
     };
@@ -18,26 +21,39 @@ internal sealed class MainForm : Form
     public MainForm()
     {
         Text = "CATIA Body Viewer";
-        Width = 460;
-        Height = 240;
+        Width = 480;
+        Height = 480;
         StartPosition = FormStartPosition.CenterScreen;
 
         var table = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 2,
+            RowCount = 6,
             Padding = new Padding(12),
         };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        table.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        table.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        for (int i = 0; i < 6; i++)
+            table.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 6));
 
         table.Controls.Add(MakeButton("Store as Body 1", () => Store(1)), 0, 0);
         table.Controls.Add(MakeButton("Store as Body 2", () => Store(2)), 1, 0);
-        table.Controls.Add(MakeButton("Show Body 1 only", () => ShowOnly(1)), 0, 1);
-        table.Controls.Add(MakeButton("Show Body 2 only", () => ShowOnly(2)), 1, 1);
+        table.Controls.Add(MakeButton("Show Body 1 only", () => ShowBody(1)), 0, 1);
+        table.Controls.Add(MakeButton("Show Body 2 only", () => ShowBody(2)), 1, 1);
+        table.Controls.Add(MakeButton("Select seal faces (Body 1)", () => SelectSealFaces(1)), 0, 2);
+        table.Controls.Add(MakeButton("Select seal faces (Body 2)", () => SelectSealFaces(2)), 1, 2);
+        table.Controls.Add(MakeButton("Show seal 1 only", () => ShowSeal(1)), 0, 3);
+        table.Controls.Add(MakeButton("Show seal 2 only", () => ShowSeal(2)), 1, 3);
+
+        Button showAssembly = MakeButton("Show Body 1, Body 2 and seals together", ShowAssembly);
+        table.Controls.Add(showAssembly, 0, 4);
+        table.SetColumnSpan(showAssembly, 2);
+
+        _makeSeal = MakeButton("Make seal", MakeSeal);
+        _makeSeal.Enabled = false;
+        table.Controls.Add(_makeSeal, 0, 5);
+        table.SetColumnSpan(_makeSeal, 2);
 
         Controls.Add(table);
         Controls.Add(_status);
@@ -58,7 +74,7 @@ internal sealed class MainForm : Form
 
     private void Store(int slot)
     {
-        try
+        Run(() =>
         {
             dynamic doc = CatiaConnection.GetActiveDocument();
             object? body = CatiaBodies.GetSelectedBody(doc);
@@ -68,31 +84,150 @@ internal sealed class MainForm : Form
                 return;
             }
 
-            if (slot == 1) _body1 = body;
-            else _body2 = body;
-
+            _bodies[slot] = body;
             SetStatus($"Stored the selected body as Body {slot}.");
-        }
-        catch (Exception ex)
-        {
-            SetStatus($"Error: {ex.Message}");
-        }
+        });
     }
 
-    private void ShowOnly(int slot)
+    private void ShowBody(int slot)
     {
-        object? body = slot == 1 ? _body1 : _body2;
+        object? body = _bodies[slot];
         if (body is null)
         {
             SetStatus($"Body {slot} is not stored yet.");
             return;
         }
 
-        try
+        Run(() =>
         {
             dynamic doc = CatiaConnection.GetActiveDocument();
             CatiaBodies.ShowOnly(doc, body);
             SetStatus($"Showing Body {slot} only.");
+        });
+    }
+
+    private void SelectSealFaces(int slot)
+    {
+        object? body = _bodies[slot];
+        if (body is null)
+        {
+            SetStatus($"Store Body {slot} first.");
+            return;
+        }
+
+        Run(() =>
+        {
+            dynamic doc = CatiaConnection.GetActiveDocument();
+            CatiaBodies.ShowOnly(doc, body);
+
+            using var selectDialog = new SelectFacesDialog($"Body {slot}");
+            if (selectDialog.ShowDialog(this) != DialogResult.OK)
+            {
+                SetStatus("Seal creation cancelled.");
+                return;
+            }
+
+            List<object> faces = CatiaSeals.GetSelectedFaceReferences(doc, body);
+
+            // Replace any seal previously created for this body.
+            if (_seals[slot] is { } previous)
+            {
+                CatiaSeals.TryDelete(doc, previous);
+                _seals[slot] = null;
+                _sealResult = null;
+            }
+
+            // Create with defaults: 3mm, no flip.
+            const double defaultThicknessMm = 3.0;
+            const bool defaultReverse = false;
+            _seals[slot] = CatiaSeals.CreateSealBody(
+                doc, $"Seal body {slot}", faces, defaultThicknessMm, defaultReverse);
+            CatiaBodies.ShowOnly(doc, _seals[slot]);
+            SetStatus($"Seal created with 3mm thickness (0 flip). Adjust if needed.");
+
+            // Let user adjust if desired.
+            using var adjustDialog = new AdjustSealDialog(defaultThicknessMm, defaultReverse);
+            if (adjustDialog.ShowDialog(this) == DialogResult.OK &&
+                (adjustDialog.DistanceMm != defaultThicknessMm || adjustDialog.Reverse != defaultReverse))
+            {
+                CatiaSeals.TryDelete(doc, _seals[slot]);
+                _seals[slot] = CatiaSeals.CreateSealBody(
+                    doc, $"Seal body {slot}", faces, adjustDialog.DistanceMm, adjustDialog.Reverse);
+                CatiaBodies.ShowOnly(doc, _seals[slot]);
+            }
+
+            UpdateMakeSealEnabled();
+            SetStatus($"Seal volume for Body {slot} created from {faces.Count} face(s).");
+        });
+    }
+
+    private void ShowSeal(int slot)
+    {
+        object? seal = _seals[slot];
+        if (seal is null)
+        {
+            SetStatus($"No seal created for Body {slot} yet.");
+            return;
+        }
+
+        Run(() =>
+        {
+            dynamic doc = CatiaConnection.GetActiveDocument();
+            CatiaBodies.ShowOnly(doc, seal);
+            SetStatus($"Showing seal {slot} only.");
+        });
+    }
+
+    private void MakeSeal()
+    {
+        if (_bodies[1] is not { } body1 || _bodies[2] is not { } body2 ||
+            _seals[1] is not { } seal1 || _seals[2] is not { } seal2)
+        {
+            SetStatus("Both bodies and both seals are needed first.");
+            return;
+        }
+
+        Run(() =>
+        {
+            dynamic doc = CatiaConnection.GetActiveDocument();
+            _sealResult = CatiaSeals.MakeSeal(doc, body1, body2, seal1, seal2);
+            SetStatus("Seal made: intersection is green and added to PartBody.");
+        });
+    }
+
+    // Shows Body 1, Body 2, both seal bodies and the final Seal (whichever exist),
+    // and hides everything else, including PartBody.
+    private void ShowAssembly()
+    {
+        var toShow = new List<object>();
+        foreach (object? body in new[] { _bodies[1], _bodies[2], _seals[1], _seals[2], _sealResult })
+        {
+            if (body is not null)
+                toShow.Add(body);
+        }
+
+        if (toShow.Count == 0)
+        {
+            SetStatus("Nothing stored yet.");
+            return;
+        }
+
+        Run(() =>
+        {
+            dynamic doc = CatiaConnection.GetActiveDocument();
+            CatiaBodies.ShowOnlyBodies(doc, toShow);
+            SetStatus($"Showing {toShow.Count} bodies together; everything else hidden.");
+        });
+    }
+
+    private void UpdateMakeSealEnabled() =>
+        _makeSeal.Enabled = _seals[1] is not null && _seals[2] is not null;
+
+    private void Run(Action action)
+    {
+        try
+        {
+            action();
         }
         catch (Exception ex)
         {

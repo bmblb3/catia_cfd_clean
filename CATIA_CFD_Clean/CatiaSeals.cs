@@ -1,0 +1,164 @@
+namespace CATIA_CFD_Clean;
+
+// Seal creation: selected faces -> geoset (join) -> thick surface in a new body,
+// and the final boolean combination of two seals with the original bodies.
+internal static class CatiaSeals
+{
+    // Reads the faces currently selected in CATIA and returns a Reference for each.
+    // Every face must belong to the given body.
+    public static List<object> GetSelectedFaceReferences(dynamic doc, object body)
+    {
+        dynamic part = doc.Part;
+        dynamic selection = doc.Selection;
+        int count = selection.Count;
+        if (count == 0)
+            throw new InvalidOperationException("No faces are selected in CATIA.");
+
+        string bodyName = CatiaBodies.NameOf(body);
+        var references = new List<object>();
+        for (int i = 1; i <= count; i++)
+        {
+            dynamic element = selection.Item(i);
+
+            string? type = TryGetType(element);
+            // CATIA reports faces as "Face", "PlanarFace", "CylindricalFace", etc.
+            if (type is not null && !type.EndsWith("Face", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Selected item {i} is a {type}; select faces only.");
+
+            object value = element.Value;
+            var trail = new List<string>();
+            object? owner = CatiaBodies.FindOwningBody(value, trail);
+            if (owner is null || CatiaBodies.NameOf(owner) != bodyName)
+                throw new InvalidOperationException(
+                    $"Selected item {i} is not a face of {bodyName}.");
+
+            references.Add(GetReference(part, element, value));
+        }
+        return references;
+    }
+
+    // Creates a new body containing a geoset (joined faces) and a thick surface.
+    public static object CreateSealBody(dynamic doc, string name, IReadOnlyList<object> faces,
+        double distanceMm, bool reverse)
+    {
+        dynamic part = doc.Part;
+        dynamic newBody = part.Bodies.Add();
+        newBody.Name = name;
+
+        try
+        {
+            dynamic geoset = newBody.HybridBodies.Add();
+            geoset.Name = "Seal faces";
+
+            dynamic hsf = part.HybridShapeFactory;
+            dynamic surface;
+            if (faces.Count == 1)
+            {
+                surface = hsf.AddNewExtract(faces[0]);
+            }
+            else
+            {
+                surface = hsf.AddNewJoin(faces[0], faces[1]);
+                for (int i = 2; i < faces.Count; i++)
+                    surface.AddElement(faces[i]);
+            }
+            geoset.AppendHybridShape(surface);
+            part.InWorkObject = geoset;
+            part.Update();
+
+            dynamic surfaceRef = part.CreateReferenceFromObject(surface);
+            part.InWorkObject = newBody;
+            dynamic thick = part.ShapeFactory.AddNewThickSurface(surfaceRef, 0, distanceMm, 0.0);
+            if (reverse)
+                thick.swap_OffsetSide();
+            part.Update();
+        }
+        catch
+        {
+            TryDelete(doc, newBody);
+            throw;
+        }
+
+        return newBody;
+    }
+
+    // Intersects the two seals into a new green body, then adds
+    // body 1, body 2 and the green seal to the main body (PartBody).
+    public static object MakeSeal(dynamic doc, object body1, object body2, object seal1, object seal2)
+    {
+        dynamic part = doc.Part;
+        dynamic shapes = part.ShapeFactory;
+        dynamic selection = doc.Selection;
+
+        dynamic result = part.Bodies.Add();
+        result.Name = "Seal";
+        try
+        {
+            part.InWorkObject = result;
+            shapes.AddNewAdd(seal1);
+            shapes.AddNewIntersect(seal2);
+            part.Update();
+        }
+        catch (Exception ex)
+        {
+            TryDelete(doc, result);
+            throw new InvalidOperationException(
+                "Could not intersect the two seals. Check that they overlap. " + ex.Message, ex);
+        }
+
+        selection.Clear();
+        selection.Add(result);
+        selection.VisProperties.SetRealColor(0, 255, 0, 1);
+        selection.Clear();
+
+        dynamic mainBody = part.MainBody;
+        string mainName = (string)mainBody.Name;
+        part.InWorkObject = mainBody;
+        foreach (object body in new object[] { body1, body2, result })
+        {
+            if (CatiaBodies.NameOf(body) == mainName)
+                continue; // a body cannot be added to itself
+            shapes.AddNewAdd(body);
+        }
+        part.Update();
+        return result;
+    }
+
+    public static void TryDelete(dynamic doc, object body)
+    {
+        try
+        {
+            dynamic selection = doc.Selection;
+            selection.Clear();
+            selection.Add(body);
+            selection.Delete();
+            selection.Clear();
+        }
+        catch
+        {
+            // Best effort cleanup.
+        }
+    }
+
+    private static string? TryGetType(dynamic element)
+    {
+        try { return (string)element.Type; }
+        catch { return null; }
+    }
+
+    private static object GetReference(dynamic part, dynamic element, object value)
+    {
+        try
+        {
+            object reference = element.Reference;
+            if (reference is not null)
+                return reference;
+        }
+        catch
+        {
+            // Fall back to creating a reference from the object.
+        }
+        return part.CreateReferenceFromObject(value);
+    }
+}

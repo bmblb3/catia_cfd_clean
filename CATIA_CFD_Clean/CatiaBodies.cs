@@ -45,11 +45,73 @@ internal static class CatiaBodies
         selection.Add(body);
         selection.VisProperties.SetShow(ShowAttr);
         selection.Clear();
+
+        // Geometrical sets inside the body (e.g. a seal's surface) are shown with it.
+        try
+        {
+            dynamic body_ = body;
+            int geosets = body_.HybridBodies.Count;
+            for (int i = 1; i <= geosets; i++)
+                selection.Add(body_.HybridBodies.Item(i));
+            if (geosets > 0)
+                selection.VisProperties.SetShow(ShowAttr);
+        }
+        catch
+        {
+            // Bodies without geosets: nothing more to show.
+        }
+        selection.Clear();
+    }
+
+    // Shows exactly the given bodies (and the geosets inside them) and hides
+    // everything else: all other bodies, including PartBody, and top-level geosets.
+    public static void ShowOnlyBodies(dynamic doc, IReadOnlyList<object> bodiesToShow)
+    {
+        dynamic part = doc.Part;
+        dynamic selection = doc.Selection;
+
+        // Hide everything first.
+        selection.Clear();
+        int bodyCount = part.Bodies.Count;
+        for (int i = 1; i <= bodyCount; i++)
+        {
+            dynamic body = part.Bodies.Item(i);
+            selection.Add(body);
+
+            int geosets = body.HybridBodies.Count;
+            for (int j = 1; j <= geosets; j++)
+                selection.Add(body.HybridBodies.Item(j));
+        }
+        int topLevelGeosets = part.HybridBodies.Count;
+        for (int i = 1; i <= topLevelGeosets; i++)
+            selection.Add(part.HybridBodies.Item(i));
+        if (selection.Count > 0)
+            selection.VisProperties.SetShow(NoShowAttr);
+        selection.Clear();
+
+        // Then show only the wanted bodies and their geosets.
+        foreach (object body in bodiesToShow)
+        {
+            dynamic node = body;
+            selection.Add(node);
+            int geosets = node.HybridBodies.Count;
+            for (int j = 1; j <= geosets; j++)
+                selection.Add(node.HybridBodies.Item(j));
+        }
+        if (selection.Count > 0)
+            selection.VisProperties.SetShow(ShowAttr);
+        selection.Clear();
+    }
+
+    public static string NameOf(object body)
+    {
+        dynamic node = body;
+        return (string)node.Name;
     }
 
     // Walks up the Parent chain (face -> feature -> body, edge -> ..., etc.)
     // until it reaches a body. Each step is recorded in trail for diagnostics.
-    private static object? FindOwningBody(object item, List<string> trail)
+    internal static object? FindOwningBody(object item, List<string> trail)
     {
         object? current = item;
         for (int depth = 0; depth < MaxParentDepth && current is not null; depth++)
