@@ -74,13 +74,14 @@ internal static class CatiaSeals
                 thick.swap_OffsetSide();
             part.Update();
 
-            // Hide the geoset and color the body red.
+            // Hide the geoset (the thick surface still depends on it, so it cannot be deleted).
             dynamic selection = doc.Selection;
             selection.Clear();
             selection.Add(geoset);
-            selection.VisProperties.SetShowElement(0);
+            selection.VisProperties.SetShow(1); // catVisPropertyNoShowAttr
             selection.Clear();
 
+            // Color the body red.
             selection.Add(newBody);
             selection.VisProperties.SetRealColor(255, 0, 0, 1); // red
             selection.Clear();
