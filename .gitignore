@@ -1,0 +1,50 @@
+# Build output (matches at any depth, so CATIA_CFD_Clean/bin and obj are covered)
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio / IDE user-specific files
+.vs/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# NuGet
+project.lock.json
+project.fragment.lock.json
+artifacts/
+*.nupkg
+*.snupkg
+packages/
+!packages/build/
+
+# Test results and coverage
+TestResults/
+[Tt]est[Rr]esult*/
+coverage*.json
+*.coverage
+*.coveragexml
+
+# Rider / JetBrains
+.idea/
+
+# ReSharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# Logs, temp and crash dumps
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+*.dmp
+Thumbs.db
+Desktop.ini
+
+# OS-generated
+.DS_Store
