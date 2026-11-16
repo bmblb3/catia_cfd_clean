@@ -142,7 +142,9 @@ internal sealed class MainForm : Form
             const bool defaultReverse = false;
             _seals[slot] = CatiaSeals.CreateSealBody(
                 doc, $"Seal body {slot}", faces, defaultThicknessMm, defaultReverse);
-            CatiaBodies.ShowOnly(doc, _seals[slot]);
+
+            // Show context: both original bodies and both seals (if they exist).
+            ShowSealWithContext(doc, slot);
             SetStatus($"Seal created with 3mm thickness (0 flip). Adjust if needed.");
 
             // Let user adjust if desired.
@@ -153,7 +155,7 @@ internal sealed class MainForm : Form
                 CatiaSeals.TryDelete(doc, _seals[slot]);
                 _seals[slot] = CatiaSeals.CreateSealBody(
                     doc, $"Seal body {slot}", faces, adjustDialog.DistanceMm, adjustDialog.Reverse);
-                CatiaBodies.ShowOnly(doc, _seals[slot]);
+                ShowSealWithContext(doc, slot);
             }
 
             UpdateMakeSealEnabled();
@@ -176,6 +178,19 @@ internal sealed class MainForm : Form
             CatiaBodies.ShowOnly(doc, seal);
             SetStatus($"Showing seal {slot} only.");
         });
+    }
+
+    private void ShowSealWithContext(dynamic doc, int slot)
+    {
+        // Show both original bodies and both seals so user can see the spatial relationship.
+        var toShow = new List<object>();
+        if (_bodies[1] is not null) toShow.Add(_bodies[1]);
+        if (_bodies[2] is not null) toShow.Add(_bodies[2]);
+        if (_seals[1] is not null) toShow.Add(_seals[1]);
+        if (_seals[2] is not null) toShow.Add(_seals[2]);
+
+        if (toShow.Count > 0)
+            CatiaBodies.ShowOnlyBodies(doc, toShow);
     }
 
     private void MakeSeal()
