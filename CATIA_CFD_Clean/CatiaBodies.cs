@@ -55,7 +55,7 @@ internal static class CatiaBodies
             for (int i = 1; i <= geosets; i++)
             {
                 dynamic geoset = body_.HybridBodies.Item(i);
-                if ((string)geoset.Name == CatiaSeals.SealFacesGeosetName)
+                if (CatiaSeals.IsHelperGeoset((string)geoset.Name))
                     sealGeosets.Add(geoset);
                 else
                     selection.Add(geoset);
@@ -111,7 +111,7 @@ internal static class CatiaBodies
             for (int j = 1; j <= geosets; j++)
             {
                 dynamic geoset = node.HybridBodies.Item(j);
-                if ((string)geoset.Name != CatiaSeals.SealFacesGeosetName)
+                if (!CatiaSeals.IsHelperGeoset((string)geoset.Name))
                     selection.Add(geoset);
             }
         }

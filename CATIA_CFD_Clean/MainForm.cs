@@ -7,6 +7,7 @@ internal sealed class MainForm : Form
     private readonly object?[] _bodies = new object?[3]; // index 1 and 2 used
     private readonly object?[] _seals = new object?[3];  // index 1 and 2 used
     private object? _sealResult;                         // the green intersected "Seal" body
+    private readonly List<object> _plugs = new();       // confirmed plug bodies
 
     private readonly Button _makeSeal;
 
@@ -22,7 +23,7 @@ internal sealed class MainForm : Form
     {
         Text = "CATIA Body Viewer";
         Width = 480;
-        Height = 480;
+        Height = 580;
         StartPosition = FormStartPosition.CenterScreen;
 
         var table = new TableLayoutPanel
@@ -55,7 +56,21 @@ internal sealed class MainForm : Form
         table.Controls.Add(_makeSeal, 0, 5);
         table.SetColumnSpan(_makeSeal, 2);
 
-        Controls.Add(table);
+        var sealGroup = new GroupBox { Text = "O-I sealing", Dock = DockStyle.Fill };
+        sealGroup.Controls.Add(table);
+
+        var plugGroup = new GroupBox { Text = "Plug sealing", Dock = DockStyle.Fill };
+        var plugPanel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12, 4, 12, 4) };
+        plugPanel.Controls.Add(MakeButton("Select plug curve", SelectPlugCurve), 0, 0);
+        plugGroup.Controls.Add(plugPanel);
+
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(6) };
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
+        root.Controls.Add(sealGroup, 0, 0);
+        root.Controls.Add(plugGroup, 0, 1);
+
+        Controls.Add(root);
         Controls.Add(_status);
         SetStatus("Select a body in CATIA, then click a Store button.");
     }
@@ -170,6 +185,51 @@ internal sealed class MainForm : Form
         });
     }
 
+    private void SelectPlugCurve()
+    {
+        Run(() =>
+        {
+            dynamic doc = CatiaConnection.GetActiveDocument();
+
+            using var selectDialog = new SelectFacesDialog(
+                "plug",
+                "In CATIA, select a closed chain of curves\n" +
+                "(Ctrl+click to select several).\n\n" +
+                "Then click OK.",
+                "Select plug curve");
+            if (selectDialog.ShowDialog(this) != DialogResult.OK)
+            {
+                SetStatus("Plug creation cancelled.");
+                return;
+            }
+
+            List<object> curves = CatiaSeals.GetSelectedCurveReferences(doc);
+
+            const double defaultThicknessMm = 2.0;
+            object plug = CatiaSeals.CreatePlugBody(doc, "Plug body", curves, defaultThicknessMm, false);
+            SetStatus("Adjusting plug. Changes update live in CATIA.");
+
+            using var adjustDialog = new AdjustSealDialog(
+                "Plug",
+                defaultThicknessMm,
+                distance => CatiaSeals.SetSealThickness(doc, plug, distance),
+                () => CatiaSeals.FlipSeal(doc, plug));
+
+            if (adjustDialog.ShowDialog(this) != DialogResult.OK)
+            {
+                CatiaSeals.TryDelete(doc, plug);
+                SetStatus("Plug discarded.");
+                return;
+            }
+
+            CatiaSeals.SetBodyColor(doc, plug, CatiaSeals.ResultColor);
+            _plugs.Add(plug);
+
+            string side = adjustDialog.Flipped ? ", flipped" : "";
+            SetStatus($"Plug created: {curves.Count} curve(s), {adjustDialog.DistanceMm} mm{side}.");
+        });
+    }
+
     private void ShowSeal(int slot)
     {
         object? seal = _seals[slot];
@@ -226,6 +286,7 @@ internal sealed class MainForm : Form
             if (body is not null)
                 toShow.Add(body);
         }
+        toShow.AddRange(_plugs);
 
         if (toShow.Count == 0)
         {

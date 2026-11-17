@@ -95,6 +95,91 @@ internal static class CatiaSeals
         return newBody;
     }
 
+    public const string PlugFillGeosetName = "Plug fill";
+
+    public static bool IsHelperGeoset(string name) =>
+        name == SealFacesGeosetName || name == PlugFillGeosetName;
+
+    // Reads the curves/edges currently selected in CATIA and returns a Reference for each.
+    public static List<object> GetSelectedCurveReferences(dynamic doc)
+    {
+        dynamic part = doc.Part;
+        dynamic selection = doc.Selection;
+        int count = selection.Count;
+        if (count == 0)
+            throw new InvalidOperationException("No curves are selected in CATIA.");
+
+        var references = new List<object>();
+        for (int i = 1; i <= count; i++)
+        {
+            dynamic element = selection.Item(i);
+            object value = element.Value;
+            references.Add(GetReference(part, element, value));
+        }
+        return references;
+    }
+
+    // Creates a new body with a hidden geoset holding a Fill of the closed curve chain,
+    // and a thick surface of that fill in the body.
+    public static object CreatePlugBody(dynamic doc, string name, IReadOnlyList<object> curves,
+        double distanceMm, bool reverse)
+    {
+        dynamic part = doc.Part;
+        dynamic newBody = part.Bodies.Add();
+        newBody.Name = name;
+
+        try
+        {
+            dynamic geoset = newBody.HybridBodies.Add();
+            geoset.Name = PlugFillGeosetName;
+
+            dynamic hsf = part.HybridShapeFactory;
+            object boundary;
+            if (curves.Count == 1)
+            {
+                boundary = curves[0];
+            }
+            else
+            {
+                dynamic join = hsf.AddNewJoin(curves[0], curves[1]);
+                for (int i = 2; i < curves.Count; i++)
+                    join.AddElement(curves[i]);
+                geoset.AppendHybridShape(join);
+                part.InWorkObject = geoset;
+                part.Update();
+                boundary = part.CreateReferenceFromObject(join);
+            }
+
+            dynamic fill = hsf.AddNewFill();
+            fill.AddBound((dynamic)boundary);
+            geoset.AppendHybridShape(fill);
+            part.InWorkObject = geoset;
+            part.Update();
+
+            dynamic fillRef = part.CreateReferenceFromObject(fill);
+            part.InWorkObject = newBody;
+            dynamic thick = part.ShapeFactory.AddNewThickSurface(fillRef, 0, distanceMm, 0.0);
+            if (reverse)
+                thick.swap_OffsetSide();
+            part.Update();
+
+            dynamic selection = doc.Selection;
+            selection.Clear();
+            selection.Add(geoset);
+            selection.VisProperties.SetShow(1);
+            selection.Clear();
+
+            SetBodyColor(doc, newBody, CandidateColor);
+        }
+        catch
+        {
+            TryDelete(doc, newBody);
+            throw;
+        }
+
+        return newBody;
+    }
+
     // Changes the thickness of an existing seal body in place (no rebuild).
     public static void SetSealThickness(dynamic doc, object sealBody, double distanceMm)
     {

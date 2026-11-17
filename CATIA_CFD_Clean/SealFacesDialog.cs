@@ -5,9 +5,9 @@ namespace CATIA_CFD_Clean;
 // Asks the user to select seal faces in CATIA.
 internal sealed class SelectFacesDialog : Form
 {
-    public SelectFacesDialog(string bodyLabel)
+    public SelectFacesDialog(string bodyLabel, string? customInstructions = null, string? title = null)
     {
-        Text = $"Select seal faces - {bodyLabel}";
+        Text = title ?? $"Select seal faces - {bodyLabel}";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -17,9 +17,10 @@ internal sealed class SelectFacesDialog : Form
 
         var instructions = new Label
         {
-            Text = $"In CATIA, select one or more faces of {bodyLabel}\n" +
-                   "(Ctrl+click to select several).\n\n" +
-                   "Then click OK.",
+            Text = customInstructions ??
+                   ($"In CATIA, select one or more faces of {bodyLabel}\n" +
+                    "(Ctrl+click to select several).\n\n" +
+                    "Then click OK."),
             Location = new Point(12, 12),
             Size = new Size(336, 70),
         };
