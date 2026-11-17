@@ -145,7 +145,7 @@ internal static class CatiaSeals
 
         // The boolean features keep the red inherited from the seal operands, so the
         // helper colours the result body and each of its child features explicitly.
-        SetBodyColor(doc, result, ResultColor);
+        SetBodyColor(doc, result, ResultColor, includeFeatures: true);
 
         return result;
     }
@@ -154,16 +154,22 @@ internal static class CatiaSeals
     public static readonly (int R, int G, int B) ConfirmedColor = (255, 0, 0);     // red
     public static readonly (int R, int G, int B) ResultColor = (0, 255, 0);        // green
 
-    // Colours a body and each of its features (features can otherwise keep an old colour).
-    public static void SetBodyColor(dynamic doc, object body, (int R, int G, int B) color)
+    // Colours a body. With includeFeatures, its features are coloured too (boolean
+    // features otherwise keep their operands' colour). Never use includeFeatures on
+    // seal bodies: a feature-level colour there overrides the green of the final Seal.
+    public static void SetBodyColor(dynamic doc, object body, (int R, int G, int B) color,
+        bool includeFeatures = false)
     {
         dynamic selection = doc.Selection;
         selection.Clear();
         selection.Add(body);
-        dynamic shapes = ((dynamic)body).Shapes;
-        int shapeCount = shapes.Count;
-        for (int i = 1; i <= shapeCount; i++)
-            selection.Add(shapes.Item(i));
+        if (includeFeatures)
+        {
+            dynamic shapes = ((dynamic)body).Shapes;
+            int shapeCount = shapes.Count;
+            for (int i = 1; i <= shapeCount; i++)
+                selection.Add(shapes.Item(i));
+        }
         selection.VisProperties.SetRealColor(color.R, color.G, color.B, 1);
         selection.Clear();
     }
