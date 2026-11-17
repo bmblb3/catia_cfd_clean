@@ -9,6 +9,45 @@ internal static class CatiaBodies
 
     private const int MaxParentDepth = 20;
 
+    /// <summary>
+    /// While alive, stops CATIA from highlighting every item added to the selection
+    /// (HSOSynchronized) and from redrawing the screen after each change (RefreshDisplay).
+    /// Both are the main cost when a macro selects many items. The previous values are restored
+    /// on dispose. Only for short visibility operations; never around a dialog, or CATIA would
+    /// not redraw while the user works.
+    /// </summary>
+    private sealed class QuietDisplay : IDisposable
+    {
+        private readonly dynamic? _app;
+        private readonly bool _hso;
+        private readonly bool _refresh;
+
+        public QuietDisplay(object doc)
+        {
+            try
+            {
+                dynamic app = ((dynamic)doc).Application;
+                _hso = (bool)app.HSOSynchronized;
+                _refresh = (bool)app.RefreshDisplay;
+                _app = app;
+            }
+            catch
+            {
+                return; // settings not readable: leave CATIA as it is
+            }
+            try { _app.HSOSynchronized = false; } catch { /* keep going without it */ }
+            try { _app.RefreshDisplay = false; } catch { /* keep going without it */ }
+        }
+
+        public void Dispose()
+        {
+            if (_app is null)
+                return;
+            try { _app.HSOSynchronized = _hso; } catch { /* CATIA gone */ }
+            try { _app.RefreshDisplay = _refresh; } catch { /* CATIA gone */ }
+        }
+    }
+
     // Returns the body that owns the current selection (spec tree or viewer).
     // A selected face, edge, feature, etc. resolves to its parent body.
     // Returns null if nothing is selected; throws if the selection has no body owner.
@@ -52,6 +91,7 @@ internal static class CatiaBodies
     // Returns the bodies of the part that are currently shown.
     public static List<object> GetVisibleBodies(dynamic doc)
     {
+        using var quiet = new QuietDisplay((object)doc);
         dynamic part = doc.Part;
         dynamic selection = doc.Selection;
         int count = part.Bodies.Count;
@@ -73,6 +113,7 @@ internal static class CatiaBodies
     // Hides every body in the part, then shows only the given body.
     public static void ShowOnly(dynamic doc, object body)
     {
+        using var quiet = new QuietDisplay((object)doc);
         dynamic part = doc.Part;
         dynamic selection = doc.Selection;
         int count = part.Bodies.Count;
@@ -122,6 +163,7 @@ internal static class CatiaBodies
     // everything else: all other bodies, including PartBody, and top-level geosets.
     public static void ShowOnlyBodies(dynamic doc, IReadOnlyList<object> bodiesToShow)
     {
+        using var quiet = new QuietDisplay((object)doc);
         dynamic part = doc.Part;
         dynamic selection = doc.Selection;
 
@@ -162,24 +204,103 @@ internal static class CatiaBodies
         selection.Clear();
     }
 
-    // Upper bound on items inspected per poll, so a huge selection (e.g. Ctrl+A in the
-    // spec tree) cannot turn each poll into thousands of cross-process COM calls.
-    private const int MaxItemsInspectedPerPoll = 50;
-
     /// <summary>
-    /// Returns true if at least one of the first few items in the current CATIA selection is
-    /// a face or a body. Reads item types only; intended for the periodic selection poll.
+    /// Toggles the given bodies as a group. By default: if all are shown they are hidden,
+    /// otherwise all are shown. With <paramref name="hideIfAnyShown"/> (the face-toggle rule): if any is
+    /// shown they are all hidden, otherwise all are shown. Only these bodies (and their
+    /// non-helper geosets) are touched; nothing else in the part changes, and their solid
+    /// features are left alone. Returns true if they ended up shown.
     /// </summary>
-    public static bool HasToggleableSelection(dynamic doc)
+    public static bool ToggleBodies(dynamic doc, IReadOnlyList<object> bodies, bool hideIfAnyShown = false)
+    {
+        using var quiet = new QuietDisplay((object)doc);
+        bool show = hideIfAnyShown ? !AnyShown(doc, bodies) : !AllShown(doc, bodies);
+        SetBodiesShown(doc, bodies, show);
+        return show;
+    }
+
+    // True if at least one given body is shown. Stops at the first shown one.
+    private static bool AnyShown(dynamic doc, IReadOnlyList<object> bodies)
     {
         dynamic selection = doc.Selection;
-        int count = Math.Min((int)selection.Count, MaxItemsInspectedPerPoll);
-        for (int i = 1; i <= count; i++)
+        try
         {
-            if (IsToggleable(selection.Item(i)))
-                return true;
+            foreach (object body in bodies)
+            {
+                selection.Clear();
+                selection.Add(body);
+                int show = ShowAttr;
+                selection.VisProperties.GetShow(ref show);
+                if (show == ShowAttr)
+                    return true;
+            }
+            return false;
         }
-        return false;
+        finally
+        {
+            TryClear(selection);
+        }
+    }
+
+    /// <summary>
+    /// Toggles every body in the part: if all are shown they are all hidden, otherwise all are
+    /// shown. Returns true if they ended up shown.
+    /// </summary>
+    public static bool ToggleAllBodies(dynamic doc)
+    {
+        dynamic part = doc.Part;
+        int count = part.Bodies.Count;
+        var all = new List<object>(count);
+        for (int i = 1; i <= count; i++)
+            all.Add(part.Bodies.Item(i));
+        return ToggleBodies(doc, all);
+    }
+
+    // True if every given body is shown. Stops at the first hidden one.
+    private static bool AllShown(dynamic doc, IReadOnlyList<object> bodies)
+    {
+        dynamic selection = doc.Selection;
+        try
+        {
+            foreach (object body in bodies)
+            {
+                selection.Clear();
+                selection.Add(body);
+                int show = ShowAttr;
+                selection.VisProperties.GetShow(ref show);
+                if (show != ShowAttr)
+                    return false;
+            }
+            return true;
+        }
+        finally
+        {
+            TryClear(selection);
+        }
+    }
+
+    // Shows or hides the given bodies with their non-helper geosets in a single call.
+    // Helper geosets (the seal's construction surface) are never touched, so they stay hidden.
+    private static void SetBodiesShown(dynamic doc, IReadOnlyList<object> bodies, bool show)
+    {
+        if (bodies.Count == 0)
+            return;
+
+        dynamic selection = doc.Selection;
+        try
+        {
+            selection.Clear();
+            foreach (object body in bodies)
+            {
+                selection.Add(body);
+                AddNonHelperGeosetsToSelection(selection, body);
+            }
+            selection.VisProperties.SetShow(show ? ShowAttr : NoShowAttr);
+        }
+        finally
+        {
+            TryClear(selection);
+        }
     }
 
     /// <summary>
@@ -192,127 +313,35 @@ internal static class CatiaBodies
         dynamic selection = doc.Selection;
         int count = selection.Count;
         var bodies = new List<object>();
+        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
         var names = new HashSet<string>();
+        var resolver = new BodyResolver();
         for (int i = 1; i <= count; i++)
         {
-            dynamic element = selection.Item(i);
-            object? body = null;
+            object? body;
             try
             {
-                object value = element.Value;
-                if (IsFace(element))
-                    body = FindOwningBody(value, new List<string>());
-                else if (IsBodyObject(value))
-                    body = value;
-                else
-                    body = ResolveSolidFeatureBody(value);
+                dynamic element = selection.Item(i);
+                (body, bool viaNonSolid) = resolver.Resolve((object)element.Value);
+                // Anything reached through a sketch or geoset only counts if it is a face.
+                if (body is not null && viaNonSolid && !IsFace(element))
+                    body = null;
             }
             catch
             {
                 continue; // item vanished or is not resolvable; skip it
             }
 
-            if (body is not null && names.Add(NameOf(body)))
+            // Cheap reference check first; the name check catches distinct proxies of one body.
+            if (body is not null && seen.Add(body) && names.Add(NameOf(body)))
                 bodies.Add(body);
         }
         return bodies;
     }
 
     /// <summary>
-    /// Hides the given bodies but keeps their solid features (Pad, Pocket, Sketch, ...)
-    /// shown, along with the non-helper geosets inside them. This keeps the viewport and the
-    /// spec tree in agreement: the body node is hidden while its solids stay visible.
-    /// </summary>
-    /// <param name="doc">The active CATIA part document.</param>
-    /// <param name="bodiesToHide">Bodies whose own visibility is switched off.</param>
-    public static void HideBodiesKeepSolids(dynamic doc, IReadOnlyList<object> bodiesToHide)
-    {
-        if (bodiesToHide.Count == 0)
-            return;
-
-        dynamic selection = doc.Selection;
-        try
-        {
-            // 1. Hide the bodies themselves.
-            selection.Clear();
-            foreach (object body in bodiesToHide)
-                selection.Add(body);
-            if (selection.Count > 0)
-                selection.VisProperties.SetShow(NoShowAttr);
-            selection.Clear();
-
-            // 2. Explicitly show the solid features and non-helper geosets of each body.
-            foreach (object body in bodiesToHide)
-            {
-                AddSolidsToSelection(selection, body);
-                AddNonHelperGeosetsToSelection(selection, body);
-            }
-            if (selection.Count > 0)
-                selection.VisProperties.SetShow(ShowAttr);
-        }
-        finally
-        {
-            TryClear(selection);
-        }
-    }
-
-    /// <summary>
-    /// Toggles the given bodies: if any is shown, all are hidden (solids kept visible);
-    /// if all are already hidden, all are shown again with their solids and geosets.
-    /// Returns true if the bodies ended up hidden, false if shown.
-    /// </summary>
-    public static bool ToggleBodiesKeepSolids(dynamic doc, IReadOnlyList<object> bodies)
-    {
-        dynamic selection = doc.Selection;
-        bool anyShown = false;
-        try
-        {
-            foreach (object body in bodies)
-            {
-                selection.Clear();
-                selection.Add(body);
-                int show = ShowAttr;
-                selection.VisProperties.GetShow(ref show);
-                if (show == ShowAttr)
-                {
-                    anyShown = true;
-                    break;
-                }
-            }
-        }
-        finally
-        {
-            TryClear(selection);
-        }
-
-        if (anyShown)
-        {
-            HideBodiesKeepSolids(doc, bodies);
-            return true;
-        }
-
-        try
-        {
-            selection.Clear();
-            foreach (object body in bodies)
-            {
-                selection.Add(body);
-                AddSolidsToSelection(selection, body);
-                AddNonHelperGeosetsToSelection(selection, body);
-            }
-            if (selection.Count > 0)
-                selection.VisProperties.SetShow(ShowAttr);
-        }
-        finally
-        {
-            TryClear(selection);
-        }
-        return false;
-    }
-
-    /// <summary>
-    /// Shows every solid feature (Pad, Pocket, Sketch, ...) of one body. Companion to
-    /// <see cref="HideBodiesKeepSolids"/>; does not change the body's own visibility.
+    /// Shows every solid feature (Pad, Pocket, Sketch, ...) of one body, e.g. to recover
+    /// features hidden individually. Does not change the body's own visibility.
     /// </summary>
     /// <param name="doc">The active CATIA part document.</param>
     /// <param name="body">The body whose solids are shown.</param>
@@ -391,48 +420,53 @@ internal static class CatiaBodies
         }
     }
 
-    // A selection item the F2 toggle acts on: a face, a body itself, or a solid feature
-    // (Pad, Pocket, ...) that belongs to a body.
-    private static bool IsToggleable(dynamic selectedElement)
+    /// <summary>
+    /// Walks items up to their owning body like <see cref="FindOwningBody"/>, but remembers every
+    /// node it passes. Items that share a parent (many faces of one Pad, many Pads of one body)
+    /// then stop at the first remembered node instead of repeating the whole walk in CATIA.
+    /// Nodes are matched by .NET proxy identity; if CATIA hands out a fresh proxy for the same
+    /// node, that lookup simply misses and the walk continues as before.
+    /// </summary>
+    private sealed class BodyResolver
     {
-        try
-        {
-            object value = selectedElement.Value;
-            return IsFace(selectedElement) || IsBodyObject(value) || ResolveSolidFeatureBody(value) is not null;
-        }
-        catch
-        {
-            return false;
-        }
-    }
+        private readonly Dictionary<object, (object? Body, bool ViaNonSolid)> _known =
+            new(ReferenceEqualityComparer.Instance);
 
-    // Returns the body owning a solid feature, or null if the item is not one. Sketches and
-    // geometrical sets (HybridBody) inside a body are not solid features, so anything reached
-    // through them is rejected.
-    private static object? ResolveSolidFeatureBody(object value)
-    {
-        var trail = new List<string>();
-        object? body = FindOwningBody(value, trail);
-        if (body is null)
-            return null;
-        foreach (string typeName in trail)
+        /// <summary>
+        /// Returns the owning body (null if none) and whether the path to it passed through a
+        /// sketch or geometrical set, i.e. the item is not part of a solid feature.
+        /// </summary>
+        public (object? Body, bool ViaNonSolid) Resolve(object item)
         {
-            if (typeName is "Sketch" or "HybridBody")
-                return null;
-        }
-        return body;
-    }
+            var path = new List<(object Node, bool NonSolid)>();
+            (object? Body, bool ViaNonSolid) top = (null, false);
+            object? current = item;
+            for (int depth = 0; depth < MaxParentDepth && current is not null; depth++)
+            {
+                if (_known.TryGetValue(current, out top))
+                    break;
 
-    // True if the object is a CATIA body (TypeName "Body"), the same test FindOwningBody uses.
-    private static bool IsBodyObject(object value)
-    {
-        try
-        {
-            return (string)((dynamic)value).TypeName == "Body";
-        }
-        catch
-        {
-            return false;
+                string typeName = Describe(current, out bool isBody);
+                if (isBody)
+                {
+                    top = (current, false);
+                    _known[current] = top;
+                    break;
+                }
+                path.Add((current, typeName is "Sketch" or "HybridBody"));
+
+                try { current = ((dynamic)current).Parent; }
+                catch { current = null; }
+            }
+
+            // Remember each node on the path, from the top down.
+            bool viaNonSolid = top.ViaNonSolid;
+            for (int i = path.Count - 1; i >= 0; i--)
+            {
+                viaNonSolid |= path[i].NonSolid;
+                _known[path[i].Node] = (top.Body, viaNonSolid);
+            }
+            return (top.Body, viaNonSolid);
         }
     }
 
@@ -475,24 +509,29 @@ internal static class CatiaBodies
     }
 
     // Describes a CATIA object and says whether it is a body.
-    // Bodies are recognised by TypeName "Body" or by exposing Shapes.
+    // Bodies are recognised by TypeName "Body". Only when TypeName cannot be read is the
+    // object probed for Shapes: that probe throws on every non-body, and exceptions across
+    // COM are slow, so it must not run on each step of a parent walk.
     private static string Describe(object item, out bool isBody)
     {
         isBody = false;
         dynamic node = item;
 
         string typeName;
+        bool hasTypeName;
         try
         {
             typeName = (string)node.TypeName;
             isBody = typeName == "Body";
+            hasTypeName = true;
         }
         catch (Exception ex)
         {
             typeName = $"[no TypeName: {ex.GetType().Name}]";
+            hasTypeName = false;
         }
 
-        if (!isBody)
+        if (!hasTypeName)
         {
             try
             {

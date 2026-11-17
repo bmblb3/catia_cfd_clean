@@ -10,23 +10,9 @@ internal sealed class MainForm : Form
     private readonly List<object> _locked = new();      // bodies in the locked view
     private readonly List<object> _plugs = new();       // confirmed plug bodies
 
-    // ---- Smart F2 ----
-    private readonly CatiaF2Hook _f2Hook;
-    private int _f2HookError = -1;        // -1 = not started, 0 = running, else Win32 error
-    private int _f2Pending;               // 1 while a toggle is queued on the UI thread (Interlocked)
-    private bool _polling;                // a poll tick is in progress (COM calls can pump messages)
-    private bool _busy;                   // a CATIA operation started from this form is running
-    private (int Pid, bool IsCatia) _foregroundCache;
-    private readonly System.Windows.Forms.Timer _pollTimer = new() { Interval = 100 };
+    private bool _busy;                                  // a CATIA operation is running
 
     private readonly Button _makeSeal;
-    private readonly Label _f2State = new()
-    {
-        Dock = DockStyle.Fill,
-        AutoSize = true,
-        ForeColor = SystemColors.GrayText,
-        Margin = new Padding(6, 2, 6, 2),
-    };
     private readonly TableLayoutPanel _root;
 
     private readonly Label _status = new()
@@ -40,10 +26,15 @@ internal sealed class MainForm : Form
 
     public MainForm()
     {
-        _f2Hook = new CatiaF2Hook(OnF2FromHook);
         Text = "CATIA Body Viewer";
         Width = 480;
         StartPosition = FormStartPosition.CenterScreen;
+
+        var (lockGroup, lockGrid) = MakeGroup("Lock view", 2);
+        lockGrid.Controls.Add(MakeButton("Reset to visible", ResetLock), 0, 0);
+        lockGrid.Controls.Add(MakeButton("Append selected", AppendToLock), 1, 0);
+        lockGrid.Controls.Add(MakeButton("Toggle show locked", ToggleLocked), 0, 1);
+        lockGrid.Controls.Add(MakeButton("Toggle show all", ToggleAll), 1, 1);
 
         // O-I sealing: one column per body, actions in workflow order.
         var (sealGroup, seal) = MakeGroup("O-I sealing", 2);
@@ -51,29 +42,24 @@ internal sealed class MainForm : Form
         seal.Controls.Add(MakeHeader("Body 2"), 1, 0);
         seal.Controls.Add(MakeButton("Store selected body", () => Store(1)), 0, 1);
         seal.Controls.Add(MakeButton("Store selected body", () => Store(2)), 1, 1);
-        seal.Controls.Add(MakeButton("Show body only", () => ShowBody(1)), 0, 2);
-        seal.Controls.Add(MakeButton("Show body only", () => ShowBody(2)), 1, 2);
+        seal.Controls.Add(MakeButton("Toggle show body", () => ToggleBody(1)), 0, 2);
+        seal.Controls.Add(MakeButton("Toggle show body", () => ToggleBody(2)), 1, 2);
         seal.Controls.Add(MakeButton("Select seal faces", () => SelectSealFaces(1)), 0, 3);
         seal.Controls.Add(MakeButton("Select seal faces", () => SelectSealFaces(2)), 1, 3);
-        seal.Controls.Add(MakeButton("Show seal only", () => ShowSeal(1)), 0, 4);
-        seal.Controls.Add(MakeButton("Show seal only", () => ShowSeal(2)), 1, 4);
+        seal.Controls.Add(MakeButton("Toggle show red seal", () => ToggleSeal(1)), 0, 4);
+        seal.Controls.Add(MakeButton("Toggle show red seal", () => ToggleSeal(2)), 1, 4);
         AddSpanning(seal, MakeButton("Show bodies, seals and plugs together", ShowAssembly), 5);
         _makeSeal = MakeButton("Make seal (intersect seal 1 and seal 2)", MakeSeal);
         _makeSeal.Enabled = false;
         AddSpanning(seal, _makeSeal, 6);
+        AddSpanning(seal, MakeButton("Toggle show green seal", ToggleGreenSeal), 7);
 
         var (plugGroup, plug) = MakeGroup("Plug sealing", 1);
         plug.Controls.Add(MakeButton("Select plug curve", SelectPlugCurve), 0, 0);
 
         var (visGroup, vis) = MakeGroup("Visibility", 2);
-        vis.Controls.Add(MakeButton("Toggle bodies of selected faces or bodies (F2)", () => ToggleSelectedFaces(false)), 0, 0);
+        vis.Controls.Add(MakeButton("Toggle bodies of selected faces or bodies", ToggleSelectedFaces), 0, 0);
         vis.Controls.Add(MakeButton("Show all solids in selected body", ShowSolidsInSelectedBody), 1, 0);
-        AddSpanning(vis, _f2State, 1);
-
-        var (lockGroup, lockGrid) = MakeGroup("Lock view", 3);
-        lockGrid.Controls.Add(MakeButton("Reset to visible", ResetLock), 0, 0);
-        lockGrid.Controls.Add(MakeButton("Append selected", AppendToLock), 1, 0);
-        lockGrid.Controls.Add(MakeButton("Show only locked", ShowLocked), 2, 0);
 
         _root = new TableLayoutPanel
         {
@@ -83,7 +69,7 @@ internal sealed class MainForm : Form
             AutoScroll = true,
         };
         _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        GroupBox[] groups = { sealGroup, plugGroup, visGroup, lockGroup };
+        GroupBox[] groups = { lockGroup, sealGroup, plugGroup, visGroup };
         for (int i = 0; i < groups.Length; i++)
         {
             _root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -94,9 +80,7 @@ internal sealed class MainForm : Form
         Controls.Add(_root);
         Controls.Add(_status);
 
-        _pollTimer.Tick += PollSelection;
         SetStatus("Select a body in CATIA, then click a Store button.");
-        UpdateF2State();
     }
 
     // ---- Layout helpers ----
@@ -165,37 +149,15 @@ internal sealed class MainForm : Form
         Size content = _root.GetPreferredSize(new Size(_root.ClientSize.Width, 0));
         ClientSize = new Size(ClientSize.Width, content.Height + _status.Height);
         MinimumSize = new Size(420, Height);
-
-        _f2HookError = _f2Hook.Start();
-        UpdateF2State();
-        _pollTimer.Start();
     }
 
-    protected override void OnFormClosed(FormClosedEventArgs e)
-    {
-        _pollTimer.Stop();
-        _f2Hook.Dispose();
-        base.OnFormClosed(e);
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-        {
-            _pollTimer.Dispose();
-            _f2Hook.Dispose();
-        }
-        base.Dispose(disposing);
-    }
-
-    // ---- Smart F2 ----
+    // ---- Visibility ----
 
     /// <summary>
-    /// Toggles the bodies owning the selected faces: hides them (keeping their solid features
-    /// visible) or, if all are already hidden, shows them again.
+    /// Toggles the bodies owning the selected faces: hides them or, if all are already hidden,
+    /// shows them again. Only the body nodes and their geosets change; features are not touched.
     /// </summary>
-    /// <param name="fromHotkey">True when triggered by F2 (status wording only).</param>
-    private void ToggleSelectedFaces(bool fromHotkey)
+    private void ToggleSelectedFaces()
     {
         Run(() =>
         {
@@ -207,9 +169,9 @@ internal sealed class MainForm : Form
                 return;
             }
 
-            bool hidden = CatiaBodies.ToggleBodiesKeepSolids(doc, bodies);
+            bool shown = CatiaBodies.ToggleBodies(doc, bodies, hideIfAnyShown: true);
             string noun = $"{bodies.Count} bod{(bodies.Count == 1 ? "y" : "ies")}";
-            SetStatus($"{(fromHotkey ? "F2: " : "")}{(hidden ? $"Hid {noun}; solids kept visible." : $"Showed {noun}.")}");
+            SetStatus(shown ? $"Showed {noun}." : $"Hid {noun}.");
         });
     }
 
@@ -230,79 +192,6 @@ internal sealed class MainForm : Form
         });
     }
 
-    // Called on the hook thread. Only queues work; repeated presses while one is queued are dropped.
-    private void OnF2FromHook()
-    {
-        if (Interlocked.Exchange(ref _f2Pending, 1) != 0)
-            return;
-
-        try
-        {
-            BeginInvoke(() =>
-            {
-                try { ToggleSelectedFaces(true); }
-                finally { Volatile.Write(ref _f2Pending, 0); }
-            });
-        }
-        catch
-        {
-            // Form is closing or its handle is gone.
-            Volatile.Write(ref _f2Pending, 0);
-        }
-    }
-
-    // Keeps the hook's view of CATIA up to date. The hook itself cannot make COM calls, so it
-    // relies on this poll to know whether CATIA is in front and whether faces are selected.
-    private void PollSelection(object? sender, EventArgs e)
-    {
-        if (_polling)
-            return;
-
-        _polling = true;
-        try
-        {
-            int catiaPid = CatiaF2Hook.GetForegroundCatiaProcessId(ref _foregroundCache);
-            bool armed = false;
-            if (catiaPid != 0 && !_busy && Volatile.Read(ref _f2Pending) == 0)
-            {
-                object? doc = CatiaConnection.TryGetActiveDocument();
-                if (doc is not null)
-                {
-                    try
-                    {
-                        armed = CatiaBodies.HasToggleableSelection(doc);
-                    }
-                    catch
-                    {
-                        // CATIA busy or the selection changed mid-read: keep the last known state.
-                        armed = _f2Hook.Armed;
-                    }
-                }
-            }
-
-            _f2Hook.CatiaProcessId = catiaPid;
-            _f2Hook.Armed = armed;
-            UpdateF2State();
-        }
-        finally
-        {
-            _polling = false;
-        }
-    }
-
-    private void UpdateF2State()
-    {
-        string text = _f2HookError switch
-        {
-            -1 => "F2 shortcut starting...",
-            0 when _f2Hook.Armed => "F2 ready: faces or bodies are selected in CATIA.",
-            0 => "F2 shortcut: select faces or bodies in CATIA, then press F2.",
-            _ => $"F2 shortcut unavailable (Windows error {_f2HookError}); use the button.",
-        };
-        if (_f2State.Text != text)
-            _f2State.Text = text;
-    }
-
     private void Store(int slot)
     {
         Run(() =>
@@ -320,20 +209,39 @@ internal sealed class MainForm : Form
         });
     }
 
-    private void ShowBody(int slot)
+    private void ToggleBody(int slot) =>
+        ToggleStored(_bodies[slot], $"Body {slot}", $"Body {slot} is not stored yet.");
+
+    private void ToggleSeal(int slot) =>
+        ToggleStored(_seals[slot], $"red seal {slot}", $"No seal created for Body {slot} yet.");
+
+    private void ToggleGreenSeal() =>
+        ToggleStored(_sealResult, "the green seal", "The green seal has not been made yet.");
+
+    // Flips one stored body's visibility without touching anything else in the part.
+    private void ToggleStored(object? body, string label, string missingMessage)
     {
-        object? body = _bodies[slot];
         if (body is null)
         {
-            SetStatus($"Body {slot} is not stored yet.");
+            SetStatus(missingMessage);
             return;
         }
 
         Run(() =>
         {
             dynamic doc = CatiaConnection.GetActiveDocument();
-            CatiaBodies.ShowOnly(doc, body);
-            SetStatus($"Showing Body {slot} only.");
+            bool shown = CatiaBodies.ToggleBodies(doc, new[] { body });
+            SetStatus($"{(shown ? "Showed" : "Hid")} {label}.");
+        });
+    }
+
+    private void ToggleAll()
+    {
+        Run(() =>
+        {
+            dynamic doc = CatiaConnection.GetActiveDocument();
+            bool shown = CatiaBodies.ToggleAllBodies(doc);
+            SetStatus(shown ? "Showed all bodies." : "Hid all bodies.");
         });
     }
 
@@ -484,36 +392,20 @@ internal sealed class MainForm : Form
         });
     }
 
-    private void ShowLocked()
+    private void ToggleLocked()
     {
         if (_locked.Count == 0)
         {
-            SetStatus("The lock is empty. Use Reset to visible or Append to lock first.");
+            SetStatus("The lock is empty. Use Reset to visible or Append selected first.");
             return;
         }
 
         Run(() =>
         {
             dynamic doc = CatiaConnection.GetActiveDocument();
-            CatiaBodies.ShowOnlyBodies(doc, _locked);
-            SetStatus($"Showing the {_locked.Count} locked bod{(_locked.Count == 1 ? "y" : "ies")} only.");
-        });
-    }
-
-    private void ShowSeal(int slot)
-    {
-        object? seal = _seals[slot];
-        if (seal is null)
-        {
-            SetStatus($"No seal created for Body {slot} yet.");
-            return;
-        }
-
-        Run(() =>
-        {
-            dynamic doc = CatiaConnection.GetActiveDocument();
-            CatiaBodies.ShowOnly(doc, seal);
-            SetStatus($"Showing seal {slot} only.");
+            bool shown = CatiaBodies.ToggleBodies(doc, _locked);
+            string noun = $"{_locked.Count} locked bod{(_locked.Count == 1 ? "y" : "ies")}";
+            SetStatus($"{(shown ? "Showed" : "Hid")} the {noun}.");
         });
     }
 
@@ -576,7 +468,7 @@ internal sealed class MainForm : Form
         _makeSeal.Enabled = _seals[1] is not null && _seals[2] is not null;
 
     // Runs a CATIA operation, reporting errors in the status bar. Operations do not nest:
-    // a second one (e.g. an F2 press while a seal dialog is open) is refused.
+    // a second one (e.g. a click while CATIA calls pump messages) is refused.
     private void Run(Action action)
     {
         if (_busy)
@@ -586,7 +478,6 @@ internal sealed class MainForm : Form
         }
 
         _busy = true;
-        _f2Hook.Armed = false; // operations change the CATIA selection; re-armed by the next poll
         try
         {
             action();
