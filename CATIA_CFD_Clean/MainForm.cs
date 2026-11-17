@@ -195,18 +195,17 @@ internal sealed class MainForm : Form
 
     private void MakeSeal()
     {
-        if (_bodies[1] is not { } body1 || _bodies[2] is not { } body2 ||
-            _seals[1] is not { } seal1 || _seals[2] is not { } seal2)
+        if (_seals[1] is not { } seal1 || _seals[2] is not { } seal2)
         {
-            SetStatus("Both bodies and both seals are needed first.");
+            SetStatus("Both seals are needed first.");
             return;
         }
 
         Run(() =>
         {
             dynamic doc = CatiaConnection.GetActiveDocument();
-            _sealResult = CatiaSeals.MakeSeal(doc, body1, body2, seal1, seal2);
-            SetStatus("Seal made: intersection is green and added to PartBody.");
+            _sealResult = CatiaSeals.MakeSeal(doc, seal1, seal2);
+            SetStatus("Seal made: the intersection is a new green body.");
         });
     }
 

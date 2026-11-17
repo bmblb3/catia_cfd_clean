@@ -4,6 +4,8 @@ namespace CATIA_CFD_Clean;
 // and the final boolean combination of two seals with the original bodies.
 internal static class CatiaSeals
 {
+    public const string SealFacesGeosetName = "Seal faces";
+
     // Reads the faces currently selected in CATIA and returns a Reference for each.
     // Every face must belong to the given body.
     public static List<object> GetSelectedFaceReferences(dynamic doc, object body)
@@ -49,7 +51,7 @@ internal static class CatiaSeals
         try
         {
             dynamic geoset = newBody.HybridBodies.Add();
-            geoset.Name = "Seal faces";
+            geoset.Name = SealFacesGeosetName;
 
             dynamic hsf = part.HybridShapeFactory;
             dynamic surface;
@@ -95,9 +97,8 @@ internal static class CatiaSeals
         return newBody;
     }
 
-    // Intersects the two seals into a new green body, then adds
-    // body 1, body 2 and the green seal to the main body (PartBody).
-    public static object MakeSeal(dynamic doc, object body1, object body2, object seal1, object seal2)
+    // Intersects the two seals into a new green body.
+    public static object MakeSeal(dynamic doc, object seal1, object seal2)
     {
         dynamic part = doc.Part;
         dynamic shapes = part.ShapeFactory;
@@ -119,21 +120,17 @@ internal static class CatiaSeals
                 "Could not intersect the two seals. Check that they overlap. " + ex.Message, ex);
         }
 
+        // The boolean features keep the red inherited from the seal operands, so colour
+        // the result body and each of its child features explicitly.
         selection.Clear();
         selection.Add(result);
+        dynamic resultShapes = ((dynamic)result).Shapes;
+        int shapeCount = resultShapes.Count;
+        for (int i = 1; i <= shapeCount; i++)
+            selection.Add(resultShapes.Item(i));
         selection.VisProperties.SetRealColor(0, 255, 0, 1);
         selection.Clear();
 
-        dynamic mainBody = part.MainBody;
-        string mainName = (string)mainBody.Name;
-        part.InWorkObject = mainBody;
-        foreach (object body in new object[] { body1, body2, result })
-        {
-            if (CatiaBodies.NameOf(body) == mainName)
-                continue; // a body cannot be added to itself
-            shapes.AddNewAdd(body);
-        }
-        part.Update();
         return result;
     }
 

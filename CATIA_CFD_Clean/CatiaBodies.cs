@@ -46,15 +46,28 @@ internal static class CatiaBodies
         selection.VisProperties.SetShow(ShowAttr);
         selection.Clear();
 
-        // Geometrical sets inside the body (e.g. a seal's surface) are shown with it.
+        // Geometrical sets inside the body are shown with it, except the seal's helper surface.
         try
         {
             dynamic body_ = body;
             int geosets = body_.HybridBodies.Count;
+            var sealGeosets = new List<object>();
             for (int i = 1; i <= geosets; i++)
-                selection.Add(body_.HybridBodies.Item(i));
-            if (geosets > 0)
+            {
+                dynamic geoset = body_.HybridBodies.Item(i);
+                if ((string)geoset.Name == CatiaSeals.SealFacesGeosetName)
+                    sealGeosets.Add(geoset);
+                else
+                    selection.Add(geoset);
+            }
+            if (selection.Count > 0)
                 selection.VisProperties.SetShow(ShowAttr);
+            selection.Clear();
+
+            foreach (object geoset in sealGeosets)
+                selection.Add(geoset);
+            if (sealGeosets.Count > 0)
+                selection.VisProperties.SetShow(NoShowAttr);
         }
         catch
         {
@@ -96,7 +109,11 @@ internal static class CatiaBodies
             selection.Add(node);
             int geosets = node.HybridBodies.Count;
             for (int j = 1; j <= geosets; j++)
-                selection.Add(node.HybridBodies.Item(j));
+            {
+                dynamic geoset = node.HybridBodies.Item(j);
+                if ((string)geoset.Name != CatiaSeals.SealFacesGeosetName)
+                    selection.Add(geoset);
+            }
         }
         if (selection.Count > 0)
             selection.VisProperties.SetShow(ShowAttr);
