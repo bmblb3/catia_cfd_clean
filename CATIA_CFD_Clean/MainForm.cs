@@ -7,6 +7,7 @@ internal sealed class MainForm : Form
     private readonly object?[] _bodies = new object?[3]; // index 1 and 2 used
     private readonly object?[] _seals = new object?[3];  // index 1 and 2 used
     private object? _sealResult;                         // the green intersected "Seal" body
+    private readonly List<object> _locked = new();      // bodies in the locked view
     private readonly List<object> _plugs = new();       // confirmed plug bodies
 
     private readonly Button _makeSeal;
@@ -23,7 +24,7 @@ internal sealed class MainForm : Form
     {
         Text = "CATIA Body Viewer";
         Width = 480;
-        Height = 580;
+        Height = 660;
         StartPosition = FormStartPosition.CenterScreen;
 
         var table = new TableLayoutPanel
@@ -64,11 +65,27 @@ internal sealed class MainForm : Form
         plugPanel.Controls.Add(MakeButton("Select plug curve", SelectPlugCurve), 0, 0);
         plugGroup.Controls.Add(plugPanel);
 
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(6) };
+        var lockGroup = new GroupBox { Text = "Lock view", Dock = DockStyle.Fill };
+        var lockPanel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            Padding = new Padding(6, 4, 6, 4),
+        };
+        for (int i = 0; i < 3; i++)
+            lockPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
+        lockPanel.Controls.Add(MakeButton("Reset to visible", ResetLock), 0, 0);
+        lockPanel.Controls.Add(MakeButton("Append to lock", AppendToLock), 1, 0);
+        lockPanel.Controls.Add(MakeButton("Show only", ShowLocked), 2, 0);
+        lockGroup.Controls.Add(lockPanel);
+
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(6) };
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
         root.Controls.Add(sealGroup, 0, 0);
         root.Controls.Add(plugGroup, 0, 1);
+        root.Controls.Add(lockGroup, 0, 2);
 
         Controls.Add(root);
         Controls.Add(_status);
@@ -227,6 +244,59 @@ internal sealed class MainForm : Form
 
             string side = adjustDialog.Flipped ? ", flipped" : "";
             SetStatus($"Plug created: {curves.Count} curve(s), {adjustDialog.DistanceMm} mm{side}.");
+        });
+    }
+
+    private void ResetLock()
+    {
+        Run(() =>
+        {
+            dynamic doc = CatiaConnection.GetActiveDocument();
+            _locked.Clear();
+            _locked.AddRange(CatiaBodies.GetVisibleBodies(doc));
+            SetStatus($"Lock reset to the {_locked.Count} currently visible bod{(_locked.Count == 1 ? "y" : "ies")}.");
+        });
+    }
+
+    private void AppendToLock()
+    {
+        Run(() =>
+        {
+            dynamic doc = CatiaConnection.GetActiveDocument();
+            List<object> selected = CatiaBodies.GetSelectedBodies(doc);
+            if (selected.Count == 0)
+            {
+                SetStatus("Select one or more bodies in CATIA first.");
+                return;
+            }
+
+            var names = new HashSet<string>(_locked.Select(CatiaBodies.NameOf));
+            int added = 0;
+            foreach (object body in selected)
+            {
+                if (names.Add(CatiaBodies.NameOf(body)))
+                {
+                    _locked.Add(body);
+                    added++;
+                }
+            }
+            SetStatus($"Added {added} bod{(added == 1 ? "y" : "ies")} to the lock ({_locked.Count} total).");
+        });
+    }
+
+    private void ShowLocked()
+    {
+        if (_locked.Count == 0)
+        {
+            SetStatus("The lock is empty. Use Reset to visible or Append to lock first.");
+            return;
+        }
+
+        Run(() =>
+        {
+            dynamic doc = CatiaConnection.GetActiveDocument();
+            CatiaBodies.ShowOnlyBodies(doc, _locked);
+            SetStatus($"Showing the {_locked.Count} locked bod{(_locked.Count == 1 ? "y" : "ies")} only.");
         });
     }
 

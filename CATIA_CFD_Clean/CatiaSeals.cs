@@ -24,9 +24,9 @@ internal static class CatiaSeals
 
             string? type = TryGetType(element);
             // CATIA reports faces as "Face", "PlanarFace", "CylindricalFace", etc.
+            // Anything else (edges, vertices, ...) is ignored.
             if (type is not null && !type.EndsWith("Face", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException(
-                    $"Selected item {i} is a {type}; select faces only.");
+                continue;
 
             object value = element.Value;
             var trail = new List<string>();
@@ -37,6 +37,8 @@ internal static class CatiaSeals
 
             references.Add(GetReference(part, element, value));
         }
+        if (references.Count == 0)
+            throw new InvalidOperationException("No faces are selected in CATIA (other items are ignored).");
         return references;
     }
 

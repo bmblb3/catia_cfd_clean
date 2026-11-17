@@ -28,6 +28,48 @@ internal static class CatiaBodies
         return body;
     }
 
+    // Returns the distinct bodies owning every item in the current selection.
+    public static List<object> GetSelectedBodies(dynamic doc)
+    {
+        dynamic selection = doc.Selection;
+        int count = selection.Count;
+        var bodies = new List<object>();
+        var names = new HashSet<string>();
+        for (int i = 1; i <= count; i++)
+        {
+            object item = selection.Item(i).Value;
+            var trail = new List<string>();
+            object? body = FindOwningBody(item, trail);
+            if (body is null)
+                throw new InvalidOperationException(
+                    $"Selected item {i} does not belong to a body. Chain: " + string.Join(" -> ", trail));
+            if (names.Add(NameOf(body)))
+                bodies.Add(body);
+        }
+        return bodies;
+    }
+
+    // Returns the bodies of the part that are currently shown.
+    public static List<object> GetVisibleBodies(dynamic doc)
+    {
+        dynamic part = doc.Part;
+        dynamic selection = doc.Selection;
+        int count = part.Bodies.Count;
+        var visible = new List<object>();
+        for (int i = 1; i <= count; i++)
+        {
+            object body = part.Bodies.Item(i);
+            selection.Clear();
+            selection.Add(body);
+            int show = ShowAttr;
+            selection.VisProperties.GetShow(ref show);
+            selection.Clear();
+            if (show == ShowAttr)
+                visible.Add(body);
+        }
+        return visible;
+    }
+
     // Hides every body in the part, then shows only the given body.
     public static void ShowOnly(dynamic doc, object body)
     {
