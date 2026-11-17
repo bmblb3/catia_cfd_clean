@@ -282,6 +282,9 @@ internal static class CatiaSeals
     private static readonly System.Text.RegularExpressions.Regex KeyPattern =
         new(@"^CFD_(\d{4})$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
+    // True for names of the form CFD_NNNN, the keys this app gives the bodies it creates.
+    public static bool IsKey(string name) => KeyPattern.IsMatch(name);
+
     // Next unused body key ("CFD_0050"): one above the highest CFD_ key in the part.
     // Every body this app creates gets one, so names stay unique and can identify it.
     public static string NextKey(dynamic doc)

@@ -2,17 +2,14 @@ using System.Windows.Forms;
 
 namespace CATIA_CFD_Clean;
 
+// The app keeps no CATIA state of its own: what it holds for a part (O-I bodies and seals, the
+// lock, plugs) lives in the .sqlite3 file next to the CATPart. Each operation reads it, works in
+// CATIA, then writes it back (see RunWithState), so it survives restarts and follows whichever
+// part is active.
 internal sealed class MainForm : Form
 {
-    private readonly object?[] _bodies = new object?[3]; // index 1 and 2 used
-    private readonly object?[] _seals = new object?[3];  // index 1 and 2 used
-    private object? _sealResult;                         // the green intersected "Seal" body
-    private readonly List<object> _locked = new();      // bodies in the locked view
-    private readonly List<object> _plugs = new();       // confirmed plug bodies
-
     private bool _busy;                                  // a CATIA operation is running
 
-    private readonly Button _makeSeal;
     private readonly TableLayoutPanel _root;
 
     private readonly Label _status = new()
@@ -48,9 +45,7 @@ internal sealed class MainForm : Form
         seal.Controls.Add(MakeButton("Toggle show red seal", () => ToggleSeal(2)), 1, 3);
         AddSpanning(seal, MakeButton("Use selected faces as seal faces (Body 1 or 2)", SelectSealFaces), 4);
         AddSpanning(seal, MakeButton("Show bodies, seals and plugs together", ShowAssembly), 5);
-        _makeSeal = MakeButton("Make seal (thicken both, then intersect)", MakeSeal);
-        _makeSeal.Enabled = false;
-        AddSpanning(seal, _makeSeal, 6);
+        AddSpanning(seal, MakeButton("Make seal (thicken both, then intersect)", MakeSeal), 6);
         AddSpanning(seal, MakeButton("Toggle show green seal", ToggleGreenSeal), 7);
         AddSpanning(seal, MakeButton("Reset (forget bodies and seals; nothing is deleted)", ResetSealing), 8);
 
@@ -61,6 +56,9 @@ internal sealed class MainForm : Form
         vis.Controls.Add(MakeButton("Toggle bodies of selected faces or bodies", ToggleSelectedFaces), 0, 0);
         vis.Controls.Add(MakeButton("Show all solids in selected body", ShowSolidsInSelectedBody), 1, 0);
 
+        var (catGroup, cat) = MakeGroup("Catalogue", 1);
+        cat.Controls.Add(MakeButton("Re-catalogue part (after deleting or undoing in CATIA)", Recatalogue), 0, 0);
+
         _root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -69,7 +67,7 @@ internal sealed class MainForm : Form
             AutoScroll = true,
         };
         _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        GroupBox[] groups = { lockGroup, sealGroup, plugGroup, visGroup };
+        GroupBox[] groups = { lockGroup, sealGroup, plugGroup, visGroup, catGroup };
         for (int i = 0; i < groups.Length; i++)
         {
             _root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -151,7 +149,7 @@ internal sealed class MainForm : Form
         MinimumSize = new Size(420, Height);
     }
 
-    // ---- Visibility ----
+    // ---- Visibility (no stored state) ----
 
     /// <summary>
     /// Toggles the bodies owning the selected faces: hides them or, if all are already hidden,
@@ -161,7 +159,7 @@ internal sealed class MainForm : Form
     {
         Run(() =>
         {
-            dynamic doc = CatiaConnection.GetActiveDocument();
+            object doc = CatiaConnection.GetActiveDocument();
             List<object> bodies = CatiaBodies.GetBodiesOfSelection(doc);
             if (bodies.Count == 0)
             {
@@ -170,8 +168,7 @@ internal sealed class MainForm : Form
             }
 
             bool shown = CatiaBodies.ToggleBodies(doc, bodies, hideIfAnyShown: true);
-            string noun = $"{bodies.Count} bod{(bodies.Count == 1 ? "y" : "ies")}";
-            SetStatus(shown ? $"Showed {noun}." : $"Hid {noun}.");
+            SetStatus(shown ? $"Showed {Bodies(bodies.Count)}." : $"Hid {Bodies(bodies.Count)}.");
         });
     }
 
@@ -179,7 +176,7 @@ internal sealed class MainForm : Form
     {
         Run(() =>
         {
-            dynamic doc = CatiaConnection.GetActiveDocument();
+            object doc = CatiaConnection.GetActiveDocument();
             object? body = CatiaBodies.GetSelectedBody(doc);
             if (body is null)
             {
@@ -192,282 +189,307 @@ internal sealed class MainForm : Form
         });
     }
 
-    private void Store(int slot)
-    {
-        Run(() =>
-        {
-            dynamic doc = CatiaConnection.GetActiveDocument();
-            object? body = CatiaBodies.GetSelectedBody(doc);
-            if (body is null)
-            {
-                SetStatus("Select a body in CATIA first.");
-                return;
-            }
-
-            _bodies[slot] = body;
-            SetStatus($"Stored the selected body as Body {slot}.");
-        });
-    }
-
-    private void ToggleBody(int slot) =>
-        ToggleStored(_bodies[slot], $"Body {slot}", $"Body {slot} is not stored yet.");
-
-    private void ToggleSeal(int slot) =>
-        ToggleStored(_seals[slot], $"red seal {slot}", $"No seal created for Body {slot} yet.");
-
-    private void ToggleGreenSeal() =>
-        ToggleStored(_sealResult, "the green seal", "The green seal has not been made yet.");
-
-    // Flips one stored body's visibility without touching anything else in the part.
-    private void ToggleStored(object? body, string label, string missingMessage)
-    {
-        if (body is null)
-        {
-            SetStatus(missingMessage);
-            return;
-        }
-
-        Run(() =>
-        {
-            dynamic doc = CatiaConnection.GetActiveDocument();
-            bool shown = CatiaBodies.ToggleBodies(doc, new[] { body });
-            SetStatus($"{(shown ? "Showed" : "Hid")} {label}.");
-        });
-    }
-
     private void ToggleAll()
     {
         Run(() =>
         {
-            dynamic doc = CatiaConnection.GetActiveDocument();
+            object doc = CatiaConnection.GetActiveDocument();
             bool shown = CatiaBodies.ToggleAllBodies(doc);
             SetStatus(shown ? "Showed all bodies." : "Hid all bodies.");
         });
     }
 
-    // Takes the faces already selected in CATIA, works out whether they are Body 1's or Body 2's,
-    // and stores them (joined in a hidden geoset) as that body's seal faces. Thickening happens
-    // in Make seal.
-    private void SelectSealFaces()
+    // ---- Lock view ----
+
+    private void ResetLock() => RunWithState((doc, state) =>
     {
-        if (_bodies[1] is null && _bodies[2] is null)
+        state.Locked.Clear();
+        state.Locked.AddRange(CatiaBodies.GetVisibleBodies(doc).Select(CatiaBodies.NameOf).Distinct());
+        SetStatus($"Lock reset to the {Bodies(state.Locked.Count)} currently visible.");
+    });
+
+    private void AppendToLock() => RunWithState((doc, state) =>
+    {
+        List<object> selected = CatiaBodies.GetSelectedBodies(doc);
+        if (selected.Count == 0)
         {
-            SetStatus("Store Body 1 and Body 2 first.");
+            SetStatus("Select one or more bodies in CATIA first.");
             return;
         }
 
-        Run(() =>
+        int added = 0;
+        foreach (string name in selected.Select(CatiaBodies.NameOf))
         {
-            dynamic doc = CatiaConnection.GetActiveDocument();
-            var (owner, faces) = ((object, List<object>))CatiaSeals.GetSelectedFaces(doc);
-
-            string ownerName = CatiaBodies.NameOf(owner);
-            int slot = 0;
-            for (int s = 1; s <= 2; s++)
+            if (!state.Locked.Contains(name))
             {
-                if (_bodies[s] is { } stored && CatiaBodies.NameOf(stored) == ownerName)
-                    slot = s;
+                state.Locked.Add(name);
+                added++;
             }
-            if (slot == 0)
-            {
-                SetStatus($"The selected faces belong to {ownerName}, which is not stored as Body 1 or Body 2.");
-                return;
-            }
+        }
+        SetStatus($"Added {Bodies(added)} to the lock ({state.Locked.Count} total).");
+    });
 
-            object? previous = _seals[slot];
-            _seals[slot] = CatiaSeals.CreateSealFacesBody(doc, CatiaSeals.NextKey(doc), faces);
-            if (previous is not null)
-            {
-                CatiaSeals.TryDelete(doc, previous);
-                _sealResult = null;
-            }
-
-            UpdateMakeSealEnabled();
-            int other = 3 - slot;
-            string next = _seals[other] is null
-                ? $"Now select the seal faces of Body {other}."
-                : "Click Make seal.";
-            SetStatus($"Stored {faces.Count} seal face(s) for Body {slot}. {next}");
-        });
-    }
-
-    private void SelectPlugCurve()
+    private void ToggleLocked() => RunWithState((doc, state) =>
     {
-        Run(() =>
-        {
-            dynamic doc = CatiaConnection.GetActiveDocument();
-
-            using var selectDialog = new SelectFacesDialog(
-                "plug",
-                "In CATIA, select a closed chain of curves\n" +
-                "(Ctrl+click to select several).\n\n" +
-                "Then click OK.",
-                "Select plug curve");
-            if (selectDialog.ShowDialog(this) != DialogResult.OK)
-            {
-                SetStatus("Plug creation cancelled.");
-                return;
-            }
-
-            List<object> curves = CatiaSeals.GetSelectedCurveReferences(doc);
-
-            const double defaultThicknessMm = 2.0;
-            object plug = CatiaSeals.CreatePlugBody(doc, CatiaSeals.NextKey(doc), curves, defaultThicknessMm, false);
-            SetStatus("Adjusting plug. Changes update live in CATIA.");
-
-            using var adjustDialog = new AdjustSealDialog(
-                "Plug",
-                defaultThicknessMm,
-                distance => CatiaSeals.SetSealThickness(doc, plug, distance),
-                () => CatiaSeals.FlipSeal(doc, plug));
-
-            if (adjustDialog.ShowDialog(this) != DialogResult.OK)
-            {
-                CatiaSeals.TryDelete(doc, plug);
-                SetStatus("Plug discarded.");
-                return;
-            }
-
-            CatiaSeals.SetBodyColor(doc, plug, CatiaSeals.ResultColor);
-            _plugs.Add(plug);
-
-            string side = adjustDialog.Flipped ? ", flipped" : "";
-            SetStatus($"Plug created: {curves.Count} curve(s), {adjustDialog.DistanceMm} mm{side}.");
-        });
-    }
-
-    private void ResetLock()
-    {
-        Run(() =>
-        {
-            dynamic doc = CatiaConnection.GetActiveDocument();
-            _locked.Clear();
-            _locked.AddRange(CatiaBodies.GetVisibleBodies(doc));
-            SetStatus($"Lock reset to the {_locked.Count} currently visible bod{(_locked.Count == 1 ? "y" : "ies")}.");
-        });
-    }
-
-    private void AppendToLock()
-    {
-        Run(() =>
-        {
-            dynamic doc = CatiaConnection.GetActiveDocument();
-            List<object> selected = CatiaBodies.GetSelectedBodies(doc);
-            if (selected.Count == 0)
-            {
-                SetStatus("Select one or more bodies in CATIA first.");
-                return;
-            }
-
-            var names = new HashSet<string>(_locked.Select(CatiaBodies.NameOf));
-            int added = 0;
-            foreach (object body in selected)
-            {
-                if (names.Add(CatiaBodies.NameOf(body)))
-                {
-                    _locked.Add(body);
-                    added++;
-                }
-            }
-            SetStatus($"Added {added} bod{(added == 1 ? "y" : "ies")} to the lock ({_locked.Count} total).");
-        });
-    }
-
-    private void ToggleLocked()
-    {
-        if (_locked.Count == 0)
+        if (state.Locked.Count == 0)
         {
             SetStatus("The lock is empty. Use Reset to visible or Append selected first.");
             return;
         }
 
-        Run(() =>
+        var (found, missing) = Resolve(doc, state.Locked);
+        if (found.Count == 0)
         {
-            dynamic doc = CatiaConnection.GetActiveDocument();
-            bool shown = CatiaBodies.ToggleBodies(doc, _locked);
-            string noun = $"{_locked.Count} locked bod{(_locked.Count == 1 ? "y" : "ies")}";
-            SetStatus($"{(shown ? "Showed" : "Hid")} the {noun}.");
-        });
-    }
-
-    // Forgets Body 1/2, both seal bodies and the green seal so a new O-I seal can be started.
-    // Only the app's references are cleared; the bodies stay in the CATIA part.
-    private void ResetSealing()
-    {
-        if (_busy)
-        {
-            SetStatus("Finish the current operation first.");
+            SetStatus("None of the locked bodies exist in the part." + MissingNote(missing));
             return;
         }
 
-        Array.Clear(_bodies);
-        Array.Clear(_seals);
-        _sealResult = null;
-        UpdateMakeSealEnabled();
-        SetStatus("O-I sealing reset. Existing bodies stay in CATIA. Store a new Body 1 and Body 2.");
-    }
+        bool shown = CatiaBodies.ToggleBodies(doc, found);
+        SetStatus($"{(shown ? "Showed" : "Hid")} the {found.Count} locked bod{(found.Count == 1 ? "y" : "ies")}." +
+                  MissingNote(missing));
+    });
+
+    // ---- O-I sealing ----
+
+    private void Store(int slot) => RunWithState((doc, state) =>
+    {
+        object? body = CatiaBodies.GetSelectedBody(doc);
+        if (body is null)
+        {
+            SetStatus("Select a body in CATIA first.");
+            return;
+        }
+
+        state.Bodies[slot] = CatiaBodies.NameOf(body);
+        SetStatus($"Stored {state.Bodies[slot]} as Body {slot}.");
+    });
+
+    private void ToggleBody(int slot) =>
+        ToggleStored(s => s.Bodies[slot], $"Body {slot}", $"Body {slot} is not stored yet.");
+
+    private void ToggleSeal(int slot) =>
+        ToggleStored(s => s.Seals[slot], $"red seal {slot}", $"No seal created for Body {slot} yet.");
+
+    private void ToggleGreenSeal() =>
+        ToggleStored(s => s.Result, "the green seal", "The green seal has not been made yet.");
+
+    // Flips one stored body's visibility without touching anything else in the part.
+    private void ToggleStored(Func<PartState, string?> pick, string label, string notStoredMessage) =>
+        RunWithState((doc, state) =>
+        {
+            string? name = pick(state);
+            if (name is null)
+            {
+                SetStatus(notStoredMessage);
+                return;
+            }
+
+            object? body = CatiaBodies.FindBody(doc, name);
+            if (body is null)
+            {
+                SetStatus($"{name} ({label}) is missing from the part. Re-catalogue to forget it.");
+                return;
+            }
+
+            bool shown = CatiaBodies.ToggleBodies(doc, new[] { body });
+            SetStatus($"{(shown ? "Showed" : "Hid")} {label}.");
+        });
+
+    // Takes the faces already selected in CATIA, works out whether they are Body 1's or Body 2's,
+    // and stores them (joined in a hidden geoset) as that body's seal faces. Thickening happens
+    // in Make seal.
+    private void SelectSealFaces() => RunWithState((doc, state) =>
+    {
+        if (state.Bodies[1] is null && state.Bodies[2] is null)
+        {
+            SetStatus("Store Body 1 and Body 2 first.");
+            return;
+        }
+
+        var (owner, faces) = CatiaSeals.GetSelectedFaces(doc);
+        string ownerName = CatiaBodies.NameOf(owner);
+        int slot = state.Bodies[2] == ownerName ? 2 : state.Bodies[1] == ownerName ? 1 : 0;
+        if (slot == 0)
+        {
+            SetStatus($"The selected faces belong to {ownerName}, which is not stored as Body 1 or Body 2.");
+            return;
+        }
+
+        string? previous = state.Seals[slot];
+        object sealBody = CatiaSeals.CreateSealFacesBody(doc, CatiaSeals.NextKey(doc), faces);
+        state.Seals[slot] = CatiaBodies.NameOf(sealBody);
+        if (previous is not null)
+        {
+            if (CatiaBodies.FindBody(doc, previous) is { } old)
+                CatiaSeals.TryDelete(doc, old);
+            state.Result = null;
+        }
+
+        int other = 3 - slot;
+        string next = state.Seals[other] is null
+            ? $"Now select the seal faces of Body {other}."
+            : "Click Make seal.";
+        SetStatus($"Stored {faces.Count} seal face(s) for Body {slot}. {next}");
+    });
 
     // Thickens each seal body that is not thickened yet (red), then intersects the two (green).
-    private void MakeSeal()
+    private void MakeSeal() => RunWithState((doc, state) =>
     {
-        if (_seals[1] is not { } seal1 || _seals[2] is not { } seal2)
+        if (state.Seals[1] is null || state.Seals[2] is null)
         {
             SetStatus("Select the seal faces of both bodies first.");
             return;
         }
 
-        Run(() =>
+        object? seal1 = CatiaBodies.FindBody(doc, state.Seals[1]);
+        object? seal2 = CatiaBodies.FindBody(doc, state.Seals[2]);
+        if (seal1 is null || seal2 is null)
         {
-            dynamic doc = CatiaConnection.GetActiveDocument();
-            foreach (var (slot, sealBody) in new[] { (1, seal1), (2, seal2) })
-            {
-                if (CatiaSeals.IsThickened(sealBody))
-                    continue;
-                try
-                {
-                    CatiaSeals.ThickenSeal(doc, sealBody);
-                }
-                catch (Exception ex)
-                {
-                    throw new InvalidOperationException(
-                        $"Could not thicken the seal faces of Body {slot}. {ex.Message}", ex);
-                }
-            }
-
-            _sealResult = CatiaSeals.MakeSeal(doc, seal1, seal2);
-            SetStatus($"Seal made: both seals thickened ({CatiaSeals.SealMainSideMm} mm / " +
-                $"{CatiaSeals.SealReverseSideMm} mm reversed) and intersected into a green body.");
-        });
-    }
-
-    // Shows Body 1, Body 2, both seal bodies and the final Seal (whichever exist),
-    // and hides everything else, including PartBody.
-    private void ShowAssembly()
-    {
-        var toShow = new List<object>();
-        foreach (object? body in new[] { _bodies[1], _bodies[2], _seals[1], _seals[2], _sealResult })
-        {
-            if (body is not null)
-                toShow.Add(body);
-        }
-        toShow.AddRange(_plugs);
-
-        if (toShow.Count == 0)
-        {
-            SetStatus("Nothing stored yet.");
+            SetStatus("A stored seal body is missing from the part. Re-catalogue, then select its seal faces again.");
             return;
         }
 
-        Run(() =>
+        foreach (var (slot, sealBody) in new[] { (1, seal1), (2, seal2) })
         {
-            dynamic doc = CatiaConnection.GetActiveDocument();
-            CatiaBodies.ShowOnlyBodies(doc, toShow);
-            SetStatus($"Showing {toShow.Count} bodies together; everything else hidden.");
-        });
+            if (CatiaSeals.IsThickened(sealBody))
+                continue;
+            try
+            {
+                CatiaSeals.ThickenSeal(doc, sealBody);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Could not thicken the seal faces of Body {slot}. {ex.Message}", ex);
+            }
+        }
+
+        state.Result = CatiaBodies.NameOf(CatiaSeals.MakeSeal(doc, seal1, seal2));
+        SetStatus($"Seal made: both seals thickened ({CatiaSeals.SealMainSideMm} mm / " +
+            $"{CatiaSeals.SealReverseSideMm} mm reversed) and intersected into a green body.");
+    });
+
+    // Shows Body 1, Body 2, both seal bodies, the final Seal and the plugs (whichever exist),
+    // and hides everything else, including PartBody.
+    private void ShowAssembly() => RunWithState((doc, state) =>
+    {
+        var names = new[] { state.Bodies[1], state.Bodies[2], state.Seals[1], state.Seals[2], state.Result }
+            .Concat(state.Plugs.Select(p => p.Name));
+        var (toShow, missing) = Resolve(doc, names);
+        if (toShow.Count == 0)
+        {
+            SetStatus("Nothing stored yet." + MissingNote(missing));
+            return;
+        }
+
+        CatiaBodies.ShowOnlyBodies(doc, toShow);
+        SetStatus($"Showing {toShow.Count} bodies together; everything else hidden." + MissingNote(missing));
+    });
+
+    // Forgets Body 1/2, both seal bodies and the green seal so a new O-I seal can be started.
+    // Only the app's references are cleared; the bodies stay in the CATIA part.
+    private void ResetSealing() => RunWithState((_, state) =>
+    {
+        Array.Clear(state.Bodies);
+        Array.Clear(state.Seals);
+        state.Result = null;
+        SetStatus("O-I sealing reset. Existing bodies stay in CATIA. Store a new Body 1 and Body 2.");
+    });
+
+    // ---- Plugs ----
+
+    private void SelectPlugCurve() => RunWithState((doc, state) =>
+    {
+        using var selectDialog = new SelectFacesDialog(
+            "plug",
+            "In CATIA, select a closed chain of curves\n" +
+            "(Ctrl+click to select several).\n\n" +
+            "Then click OK.",
+            "Select plug curve");
+        if (selectDialog.ShowDialog(this) != DialogResult.OK)
+        {
+            SetStatus("Plug creation cancelled.");
+            return;
+        }
+
+        List<object> curves = CatiaSeals.GetSelectedCurveReferences(doc);
+
+        const double defaultThicknessMm = 2.0;
+        object plug = CatiaSeals.CreatePlugBody(doc, CatiaSeals.NextKey(doc), curves, defaultThicknessMm, false);
+        SetStatus("Adjusting plug. Changes update live in CATIA.");
+
+        using var adjustDialog = new AdjustSealDialog(
+            "Plug",
+            defaultThicknessMm,
+            distance => CatiaSeals.SetSealThickness(doc, plug, distance),
+            () => CatiaSeals.FlipSeal(doc, plug));
+
+        if (adjustDialog.ShowDialog(this) != DialogResult.OK)
+        {
+            CatiaSeals.TryDelete(doc, plug);
+            SetStatus("Plug discarded.");
+            return;
+        }
+
+        CatiaSeals.SetBodyColor(doc, plug, CatiaSeals.ResultColor);
+        state.Plugs.Add(new PartState.Plug(CatiaBodies.NameOf(plug), adjustDialog.DistanceMm, adjustDialog.Flipped));
+
+        string side = adjustDialog.Flipped ? ", flipped" : "";
+        SetStatus($"Plug created: {curves.Count} curve(s), {adjustDialog.DistanceMm} mm{side}.");
+    });
+
+    // ---- Catalogue ----
+
+    // Snapshots the part's bodies into the .sqlite3 file (replacing the previous catalogue) and
+    // forgets stored bodies that no longer exist. Use after deleting or undoing in CATIA.
+    private void Recatalogue() => RunWithState((doc, state) =>
+    {
+        CatiaCatalogue.Result result = CatiaCatalogue.Run(doc);
+        int dropped = state.Prune(result.Names);
+        string dup = result.DuplicateNames == 0 ? "" : $", {result.DuplicateNames} shared name(s)";
+        string forgot = dropped == 0 ? "" : $" Forgot {dropped} stored reference(s) to missing bodies.";
+        SetStatus($"Catalogued {Bodies(result.Bodies)}{dup}.{forgot}");
+    });
+
+    // ---- Helpers ----
+
+    // Looks up stored bodies by name. Returns those still in the part and how many are missing.
+    private static (List<object> Found, int Missing) Resolve(object doc, IEnumerable<string?> names)
+    {
+        var found = new List<object>();
+        int missing = 0;
+        foreach (string? name in names)
+        {
+            if (name is null)
+                continue;
+            if (CatiaBodies.FindBody(doc, name) is { } body)
+                found.Add(body);
+            else
+                missing++;
+        }
+        return (found, missing);
     }
 
-    private void UpdateMakeSealEnabled() =>
-        _makeSeal.Enabled = _seals[1] is not null && _seals[2] is not null;
+    private static string MissingNote(int missing) => missing == 0
+        ? ""
+        : $" {Bodies(missing)} stored but missing from the part; Re-catalogue to forget {(missing == 1 ? "it" : "them")}.";
+
+    private static string Bodies(int n) => $"{n} bod{(n == 1 ? "y" : "ies")}";
+
+    // Runs an operation on the active part's stored state: reads it from the part's .sqlite3
+    // file, runs the operation (CATIA first), then writes it back. If the operation throws,
+    // nothing is written.
+    private void RunWithState(Action<object, PartState> action)
+    {
+        Run(() =>
+        {
+            object doc = CatiaConnection.GetActiveDocument();
+            string dbPath = PartDb.PathFor(doc);
+            var state = PartState.Load(dbPath);
+            action(doc, state);
+            state.Save(dbPath);
+        });
+    }
 
     // Runs a CATIA operation, reporting errors in the status bar. Operations do not nest:
     // a second one (e.g. a click while CATIA calls pump messages) is refused.

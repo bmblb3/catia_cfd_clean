@@ -89,13 +89,17 @@ internal static class CatiaBodies
     }
 
     // Returns the bodies of the part that are currently shown.
-    public static List<object> GetVisibleBodies(dynamic doc)
+    public static List<object> GetVisibleBodies(dynamic doc) =>
+        GetBodiesWithVisibility((object)doc).Where(b => b.Shown).Select(b => b.Body).ToList();
+
+    // Returns every body of the part, in tree order, with whether it is currently shown.
+    public static List<(object Body, bool Shown)> GetBodiesWithVisibility(dynamic doc)
     {
         using var quiet = new QuietDisplay((object)doc);
         dynamic part = doc.Part;
         dynamic selection = doc.Selection;
         int count = part.Bodies.Count;
-        var visible = new List<object>();
+        var bodies = new List<(object Body, bool Shown)>(count);
         for (int i = 1; i <= count; i++)
         {
             object body = part.Bodies.Item(i);
@@ -104,10 +108,9 @@ internal static class CatiaBodies
             int show = ShowAttr;
             selection.VisProperties.GetShow(ref show);
             selection.Clear();
-            if (show == ShowAttr)
-                visible.Add(body);
+            bodies.Add((body, show == ShowAttr));
         }
-        return visible;
+        return bodies;
     }
 
     // Hides every body in the part, then shows only the given body.
@@ -474,6 +477,21 @@ internal static class CatiaBodies
     {
         try { selection.Clear(); }
         catch { /* document may have closed */ }
+    }
+
+    // Finds a body of the part by name. Null if the name is null or no such body exists.
+    public static object? FindBody(dynamic doc, string? name)
+    {
+        if (name is null)
+            return null;
+        try
+        {
+            return doc.Part.Bodies.Item(name);
+        }
+        catch
+        {
+            return null; // deleted, renamed or undone in CATIA
+        }
     }
 
     public static string NameOf(object body)
