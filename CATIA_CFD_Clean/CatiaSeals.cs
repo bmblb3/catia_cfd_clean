@@ -257,7 +257,7 @@ internal static class CatiaSeals
         dynamic selection = doc.Selection;
 
         dynamic result = part.Bodies.Add();
-        result.Name = "Seal";
+        result.Name = NextKey(doc);
         try
         {
             part.InWorkObject = result;
@@ -277,6 +277,26 @@ internal static class CatiaSeals
         SetBodyColor(doc, result, ResultColor, includeFeatures: true);
 
         return result;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex KeyPattern =
+        new(@"^CFD_(\d{4})$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    // Next unused body key ("CFD_0050"): one above the highest CFD_ key in the part.
+    // Every body this app creates gets one, so names stay unique and can identify it.
+    public static string NextKey(dynamic doc)
+    {
+        dynamic part = doc.Part;
+        int count = part.Bodies.Count;
+        int max = 0;
+        for (int i = 1; i <= count; i++)
+        {
+            string name = (string)((dynamic)part.Bodies.Item(i)).Name;
+            var match = KeyPattern.Match(name);
+            if (match.Success)
+                max = Math.Max(max, int.Parse(match.Groups[1].Value));
+        }
+        return $"CFD_{max + 1:0000}";
     }
 
     public static readonly (int R, int G, int B) CandidateColor = (255, 150, 200); // pink

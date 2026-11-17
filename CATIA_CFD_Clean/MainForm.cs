@@ -275,7 +275,7 @@ internal sealed class MainForm : Form
             }
 
             object? previous = _seals[slot];
-            _seals[slot] = CatiaSeals.CreateSealFacesBody(doc, $"Seal body {slot}", faces);
+            _seals[slot] = CatiaSeals.CreateSealFacesBody(doc, CatiaSeals.NextKey(doc), faces);
             if (previous is not null)
             {
                 CatiaSeals.TryDelete(doc, previous);
@@ -312,7 +312,7 @@ internal sealed class MainForm : Form
             List<object> curves = CatiaSeals.GetSelectedCurveReferences(doc);
 
             const double defaultThicknessMm = 2.0;
-            object plug = CatiaSeals.CreatePlugBody(doc, "Plug body", curves, defaultThicknessMm, false);
+            object plug = CatiaSeals.CreatePlugBody(doc, CatiaSeals.NextKey(doc), curves, defaultThicknessMm, false);
             SetStatus("Adjusting plug. Changes update live in CATIA.");
 
             using var adjustDialog = new AdjustSealDialog(
