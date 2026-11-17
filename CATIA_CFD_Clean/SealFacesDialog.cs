@@ -45,7 +45,8 @@ internal sealed class SelectFacesDialog : Form
     }
 }
 
-// Allows user to adjust seal thickness and direction after seeing the initial result.
+// Live seal adjustment: every change is applied to the seal in CATIA straight away,
+// so the user can rotate the view, check the result, and keep tweaking.
 internal sealed class AdjustSealDialog : Form
 {
     private readonly NumericUpDown _distance = new()
@@ -54,56 +55,146 @@ internal sealed class AdjustSealDialog : Form
         Minimum = 0.01m,
         Maximum = 1000m,
         Increment = 0.5m,
-        Value = 3m,
         Width = 90,
     };
 
-    private readonly CheckBox _reverse = new() { Text = "Reverse direction", AutoSize = true };
+    private readonly Label _state = new() { AutoSize = false };
+    private readonly System.Windows.Forms.Timer _debounce = new() { Interval = 350 };
 
-    public double DistanceMm => (double)_distance.Value;
-    public bool Reverse => _reverse.Checked;
+    private readonly Action<double> _applyThickness;
+    private readonly Action _flip;
+    private decimal _appliedDistance;
+    private bool _hasError;
 
-    public AdjustSealDialog(double currentDistance, bool currentReverse)
+    public double DistanceMm => (double)_appliedDistance;
+    public bool Flipped { get; private set; }
+
+    public AdjustSealDialog(string bodyLabel, double initialDistance,
+        Action<double> applyThickness, Action flip)
     {
-        _distance.Value = (decimal)currentDistance;
-        _reverse.Checked = currentReverse;
+        _applyThickness = applyThickness;
+        _flip = flip;
+        _distance.Value = (decimal)initialDistance;
+        _appliedDistance = _distance.Value;
 
-        Text = "Adjust seal";
+        Text = $"Adjust seal - {bodyLabel}";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
         TopMost = true;
-        ClientSize = new Size(380, 150);
+        ClientSize = new Size(380, 175);
 
         var instructions = new Label
         {
-            Text = "Adjust the seal thickness and direction if needed.",
+            Text = "Changes are applied in CATIA as you edit.\n" +
+                   "Rotate the view in CATIA to check the seal, then click Done.",
             Location = new Point(12, 12),
-            Size = new Size(356, 25),
+            Size = new Size(356, 36),
         };
 
-        var distanceLabel = new Label { Text = "Thickness (mm):", AutoSize = true, Location = new Point(12, 50) };
-        _distance.Location = new Point(120, 46);
-        _reverse.Location = new Point(230, 48);
+        var distanceLabel = new Label { Text = "Thickness (mm):", AutoSize = true, Location = new Point(12, 64) };
+        _distance.Location = new Point(120, 60);
 
-        var ok = new Button
+        var flipButton = new Button
         {
-            Text = "OK",
-            DialogResult = DialogResult.OK,
-            Location = new Point(200, 100),
+            Text = "Flip side",
+            Location = new Point(230, 58),
+            Size = new Size(138, 28),
+        };
+        flipButton.Click += (_, _) => FlipNow();
+
+        _state.Location = new Point(12, 100);
+        _state.Size = new Size(356, 20);
+        SetState($"Seal shown at {_appliedDistance} mm.", isError: false);
+
+        var done = new Button
+        {
+            Text = "Done",
+            Location = new Point(200, 133),
             Size = new Size(80, 30),
         };
-        var cancel = new Button
+        done.Click += (_, _) => Finish();
+
+        var discard = new Button
         {
-            Text = "Cancel",
+            Text = "Discard",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(288, 100),
+            Location = new Point(288, 133),
             Size = new Size(80, 30),
         };
 
-        Controls.AddRange(new Control[] { instructions, distanceLabel, _distance, _reverse, ok, cancel });
-        AcceptButton = ok;
-        CancelButton = cancel;
+        _distance.ValueChanged += (_, _) =>
+        {
+            _debounce.Stop();
+            _debounce.Start();
+        };
+        _debounce.Tick += (_, _) => ApplyPendingThickness();
+
+        Controls.AddRange(new Control[] { instructions, distanceLabel, _distance, flipButton, _state, done, discard });
+        AcceptButton = done;
+        CancelButton = discard;
+    }
+
+    private void ApplyPendingThickness()
+    {
+        _debounce.Stop();
+        decimal value = _distance.Value;
+        if (value == _appliedDistance && !_hasError)
+            return;
+
+        Run(() => _applyThickness((double)value), $"Thickness set to {value} mm.");
+        if (!_hasError)
+            _appliedDistance = value;
+    }
+
+    private void FlipNow()
+    {
+        ApplyPendingThickness();
+        Run(_flip, "Flipped to the other side.");
+        if (!_hasError)
+            Flipped = !Flipped;
+    }
+
+    private void Finish()
+    {
+        _ = _distance.Value; // commits any typed-but-unconfirmed text
+        ApplyPendingThickness();
+        if (_hasError)
+            return; // keep the dialog open so the user can fix the value
+
+        DialogResult = DialogResult.OK;
+    }
+
+    private void Run(Action action, string successMessage)
+    {
+        UseWaitCursor = true;
+        try
+        {
+            action();
+            SetState(successMessage, isError: false);
+        }
+        catch (Exception ex)
+        {
+            SetState($"CATIA could not update: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            UseWaitCursor = false;
+        }
+    }
+
+    private void SetState(string message, bool isError)
+    {
+        _hasError = isError;
+        _state.Text = message;
+        _state.ForeColor = isError ? Color.Firebrick : SystemColors.GrayText;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            _debounce.Dispose();
+        base.Dispose(disposing);
     }
 }

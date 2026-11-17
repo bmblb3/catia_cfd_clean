@@ -83,10 +83,8 @@ internal static class CatiaSeals
             selection.VisProperties.SetShow(1); // catVisPropertyNoShowAttr
             selection.Clear();
 
-            // Color the body red.
-            selection.Add(newBody);
-            selection.VisProperties.SetRealColor(255, 0, 0, 1); // red
-            selection.Clear();
+            // Pink marks a candidate seal; it turns red once the user confirms it.
+            SetBodyColor(doc, newBody, CandidateColor);
         }
         catch
         {
@@ -95,6 +93,31 @@ internal static class CatiaSeals
         }
 
         return newBody;
+    }
+
+    // Changes the thickness of an existing seal body in place (no rebuild).
+    public static void SetSealThickness(dynamic doc, object sealBody, double distanceMm)
+    {
+        dynamic thick = GetThickSurface(sealBody);
+        thick.TopOffset.Value = distanceMm;
+        doc.Part.Update();
+    }
+
+    // Flips an existing seal body to the other side of its faces.
+    public static void FlipSeal(dynamic doc, object sealBody)
+    {
+        dynamic thick = GetThickSurface(sealBody);
+        thick.swap_OffsetSide();
+        doc.Part.Update();
+    }
+
+    private static dynamic GetThickSurface(object sealBody)
+    {
+        dynamic shapes = ((dynamic)sealBody).Shapes;
+        int count = shapes.Count;
+        if (count < 1)
+            throw new InvalidOperationException("The seal body has no thick surface.");
+        return shapes.Item(count);
     }
 
     // Intersects the two seals into a new green body.
@@ -120,18 +143,29 @@ internal static class CatiaSeals
                 "Could not intersect the two seals. Check that they overlap. " + ex.Message, ex);
         }
 
-        // The boolean features keep the red inherited from the seal operands, so colour
-        // the result body and each of its child features explicitly.
-        selection.Clear();
-        selection.Add(result);
-        dynamic resultShapes = ((dynamic)result).Shapes;
-        int shapeCount = resultShapes.Count;
-        for (int i = 1; i <= shapeCount; i++)
-            selection.Add(resultShapes.Item(i));
-        selection.VisProperties.SetRealColor(0, 255, 0, 1);
-        selection.Clear();
+        // The boolean features keep the red inherited from the seal operands, so the
+        // helper colours the result body and each of its child features explicitly.
+        SetBodyColor(doc, result, ResultColor);
 
         return result;
+    }
+
+    public static readonly (int R, int G, int B) CandidateColor = (255, 150, 200); // pink
+    public static readonly (int R, int G, int B) ConfirmedColor = (255, 0, 0);     // red
+    public static readonly (int R, int G, int B) ResultColor = (0, 255, 0);        // green
+
+    // Colours a body and each of its features (features can otherwise keep an old colour).
+    public static void SetBodyColor(dynamic doc, object body, (int R, int G, int B) color)
+    {
+        dynamic selection = doc.Selection;
+        selection.Clear();
+        selection.Add(body);
+        dynamic shapes = ((dynamic)body).Shapes;
+        int shapeCount = shapes.Count;
+        for (int i = 1; i <= shapeCount; i++)
+            selection.Add(shapes.Item(i));
+        selection.VisProperties.SetRealColor(color.R, color.G, color.B, 1);
+        selection.Clear();
     }
 
     public static void TryDelete(dynamic doc, object body)

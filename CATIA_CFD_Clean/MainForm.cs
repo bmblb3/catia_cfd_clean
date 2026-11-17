@@ -129,37 +129,44 @@ internal sealed class MainForm : Form
 
             List<object> faces = CatiaSeals.GetSelectedFaceReferences(doc, body);
 
-            // Replace any seal previously created for this body.
-            if (_seals[slot] is { } previous)
+            // Create with the default thickness. Any previous seal is kept (hidden) until
+            // the user confirms, so discarding restores it.
+            const double defaultThicknessMm = 3.0;
+            object? previous = _seals[slot];
+            object seal = CatiaSeals.CreateSealBody(
+                doc, $"Seal body {slot}", faces, defaultThicknessMm, false);
+            _seals[slot] = seal;
+            ShowSealWithContext(doc, slot);
+            SetStatus($"Adjusting seal for Body {slot}. Changes update live in CATIA.");
+
+            using var adjustDialog = new AdjustSealDialog(
+                $"Body {slot}",
+                defaultThicknessMm,
+                distance => CatiaSeals.SetSealThickness(doc, seal, distance),
+                () => CatiaSeals.FlipSeal(doc, seal));
+
+            if (adjustDialog.ShowDialog(this) != DialogResult.OK)
+            {
+                CatiaSeals.TryDelete(doc, seal);
+                _seals[slot] = previous;
+                ShowSealWithContext(doc, slot);
+                SetStatus(previous is null
+                    ? "Seal discarded."
+                    : $"New seal discarded; kept the previous seal for Body {slot}.");
+                return;
+            }
+
+            CatiaSeals.SetBodyColor(doc, seal, CatiaSeals.ConfirmedColor);
+
+            if (previous is not null)
             {
                 CatiaSeals.TryDelete(doc, previous);
-                _seals[slot] = null;
                 _sealResult = null;
             }
 
-            // Create with defaults: 3mm, no flip.
-            const double defaultThicknessMm = 3.0;
-            const bool defaultReverse = false;
-            _seals[slot] = CatiaSeals.CreateSealBody(
-                doc, $"Seal body {slot}", faces, defaultThicknessMm, defaultReverse);
-
-            // Show context: both original bodies and both seals (if they exist).
-            ShowSealWithContext(doc, slot);
-            SetStatus($"Seal created with 3mm thickness (0 flip). Adjust if needed.");
-
-            // Let user adjust if desired.
-            using var adjustDialog = new AdjustSealDialog(defaultThicknessMm, defaultReverse);
-            if (adjustDialog.ShowDialog(this) == DialogResult.OK &&
-                (adjustDialog.DistanceMm != defaultThicknessMm || adjustDialog.Reverse != defaultReverse))
-            {
-                CatiaSeals.TryDelete(doc, _seals[slot]);
-                _seals[slot] = CatiaSeals.CreateSealBody(
-                    doc, $"Seal body {slot}", faces, adjustDialog.DistanceMm, adjustDialog.Reverse);
-                ShowSealWithContext(doc, slot);
-            }
-
             UpdateMakeSealEnabled();
-            SetStatus($"Seal volume for Body {slot} created from {faces.Count} face(s).");
+            string side = adjustDialog.Flipped ? ", flipped" : "";
+            SetStatus($"Seal for Body {slot}: {faces.Count} face(s), {adjustDialog.DistanceMm} mm{side}.");
         });
     }
 
