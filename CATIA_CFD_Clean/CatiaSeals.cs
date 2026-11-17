@@ -164,9 +164,9 @@ internal static class CatiaSeals
     }
 
     // Creates a new body with a hidden geoset holding a Fill of the closed curve chain,
-    // and a thick surface of that fill in the body.
+    // and a thick surface of that fill in the body: distanceMm on one side, otherSideMm on the other.
     public static object CreatePlugBody(dynamic doc, string name, IReadOnlyList<object> curves,
-        double distanceMm, bool reverse)
+        double distanceMm, bool reverse, double otherSideMm = 0.0)
     {
         dynamic part = doc.Part;
         dynamic newBody = part.Bodies.Add();
@@ -202,7 +202,7 @@ internal static class CatiaSeals
 
             dynamic fillRef = part.CreateReferenceFromObject(fill);
             part.InWorkObject = newBody;
-            dynamic thick = part.ShapeFactory.AddNewThickSurface(fillRef, 0, distanceMm, 0.0);
+            dynamic thick = part.ShapeFactory.AddNewThickSurface(fillRef, 0, distanceMm, otherSideMm);
             if (reverse)
                 thick.swap_OffsetSide();
             part.Update();
@@ -287,19 +287,22 @@ internal static class CatiaSeals
 
     // Next unused body key ("CFD_0050"): one above the highest CFD_ key in the part.
     // Every body this app creates gets one, so names stay unique and can identify it.
-    public static string NextKey(dynamic doc)
+    public static string NextKey(dynamic doc) => NextKeys(doc, 1)[0];
+
+    // The next <paramref name="count"/> unused body keys, in order.
+    public static List<string> NextKeys(dynamic doc, int count)
     {
         dynamic part = doc.Part;
-        int count = part.Bodies.Count;
+        int bodyCount = part.Bodies.Count;
         int max = 0;
-        for (int i = 1; i <= count; i++)
+        for (int i = 1; i <= bodyCount; i++)
         {
             string name = (string)((dynamic)part.Bodies.Item(i)).Name;
             var match = KeyPattern.Match(name);
             if (match.Success)
                 max = Math.Max(max, int.Parse(match.Groups[1].Value));
         }
-        return $"CFD_{max + 1:0000}";
+        return Enumerable.Range(max + 1, count).Select(n => $"CFD_{n:0000}").ToList();
     }
 
     public static readonly (int R, int G, int B) CandidateColor = (255, 150, 200); // pink

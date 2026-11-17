@@ -56,6 +56,12 @@ internal sealed class MainForm : Form
         vis.Controls.Add(MakeButton("Toggle bodies of selected faces or bodies", ToggleSelectedFaces), 0, 0);
         vis.Controls.Add(MakeButton("Show all solids in selected body", ShowSolidsInSelectedBody), 1, 0);
 
+        var (wtGroup, wt) = MakeGroup("Watertight test", 2);
+        wt.Controls.Add(MakeButton("Test watertight (visible bodies)", TestWatertight), 0, 0);
+        wt.Controls.Add(MakeButton("Make test seal", MakeTestSeals), 1, 0);
+        wt.Controls.Add(MakeButton("Set flow point", SetFlowPoint), 0, 1);
+        wt.Controls.Add(MakeButton("Clean up test", CleanUpTest), 1, 1);
+
         var (catGroup, cat) = MakeGroup("Catalogue", 1);
         cat.Controls.Add(MakeButton("Re-catalogue part (after deleting or undoing in CATIA)", Recatalogue), 0, 0);
 
@@ -67,7 +73,7 @@ internal sealed class MainForm : Form
             AutoScroll = true,
         };
         _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        GroupBox[] groups = { lockGroup, sealGroup, plugGroup, visGroup, catGroup };
+        GroupBox[] groups = { lockGroup, sealGroup, plugGroup, visGroup, wtGroup, catGroup };
         for (int i = 0; i < groups.Length; i++)
         {
             _root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -438,6 +444,172 @@ internal sealed class MainForm : Form
         SetStatus($"Plug created: {curves.Count} curve(s), {adjustDialog.DistanceMm} mm{side}.");
     });
 
+    // ---- Watertight test ----
+
+    /// <summary>
+    /// Stores the visible bodies (other than test seals) as the bodies under test, lets the user
+    /// add test seals, then unions isolated copies of the bodies and every test seal and splits
+    /// the union's boundary into shells. The user checks that the flow volume is a shell of its
+    /// own, then cleans up. Clicking again after closing the seal dialog continues the same test.
+    /// State is saved after each step, so Clean up works even after an error or a restart.
+    /// </summary>
+    private void TestWatertight() => RunWithState((doc, state) =>
+    {
+        if (state.WtCopies.Count > 0 || state.WtUnion is not null)
+        {
+            SetStatus("A watertight test is already built. Click Clean up test first.");
+            return;
+        }
+
+        if (state.WtFlowPoint is null && !AskFlowPoint(doc, state))
+        {
+            SetStatus("Test cancelled: it needs a flow point first.");
+            return;
+        }
+
+        if (state.WtBodies.Count == 0)
+        {
+            state.WtBodies.AddRange(CatiaBodies.GetVisibleBodies(doc).Select(CatiaBodies.NameOf)
+                .Distinct().Except(state.WtPlugs));
+            if (state.WtBodies.Count == 0)
+            {
+                SetStatus("No bodies are visible. Show the bodies to test, then click again.");
+                return;
+            }
+            state.Save();
+        }
+
+        if (!ShowTestSealDialog(doc, state, state.WtBodies.Count))
+        {
+            SetStatus($"Test paused with {state.WtPlugs.Count} test seal(s). " +
+                      "Click Test watertight to continue, or Clean up test.");
+            return;
+        }
+
+        var (toCopy, missing) = Resolve(doc, state.WtBodies.Concat(state.WtPlugs));
+        if (missing > 0)
+        {
+            SetStatus("Some bodies of the test are missing from the part." + MissingNote(missing));
+            return;
+        }
+
+        int empty = toCopy.RemoveAll(CatiaWatertight.IsEmpty);
+        string skipped = empty == 0 ? "" : $" Skipped {Bodies(empty)} with no features.";
+        if (toCopy.Count == 0)
+        {
+            SetStatus("Nothing to test: the stored bodies have no features." + skipped);
+            return;
+        }
+
+        Progress($"Copying {Bodies(toCopy.Count)}...");
+        var (copies, failed) = CatiaWatertight.CopyAsResults(doc, toCopy);
+        state.WtCopies.AddRange(copies.Select(CatiaBodies.NameOf));
+        state.Save();
+        if (failed.Count > 0)
+        {
+            SetStatus($"Test stopped: CATIA could not copy {string.Join(", ", failed)}. Hide those bodies " +
+                      "(for a test seal: delete it in CATIA, Re-catalogue, make it again), then Clean up test and retry.");
+            return;
+        }
+
+        Progress($"Uniting {Bodies(copies.Count)}...");
+        object union = CatiaWatertight.Union(doc, copies);
+        state.WtUnion = CatiaBodies.NameOf(union);
+        state.Save();
+
+        Progress("Extracting the flow volume shell...");
+        var r = CatiaWatertight.ExtractFlowShell(doc, union, state.WtFlowPoint!);
+        CatiaWatertight.ShowOnlyShells(doc);
+
+        string summary = $"Flow volume shell: {r.FlowMm2:0} of {r.SkinMm2:0} mm2 of skin, " +
+                         $"in {r.Ms / 1000.0:0.0} s.{skipped}";
+        string verdict =
+            r.FlowDistanceMm > 0.01 ? $"The flow point is {r.FlowDistanceMm:0.##} mm from the tested bodies. Use Set flow point to pick a point on the inside surface." :
+            r.FlowMm2 >= r.SkinMm2 * 0.999 ? "LEAK: the flow volume is connected to the outer skin (one shell)." :
+            r.FlowMm2 > r.SkinMm2 - r.FlowMm2 ? "Probably a LEAK: the flow volume shell is larger than all the other shells together." :
+            "Looks WATERTIGHT: the flow volume is a separate shell.";
+        SetStatus($"{verdict} {summary}");
+
+        using var inspect = new SelectFacesDialog("",
+            $"{verdict}\n\n{summary}\nOnly the flow volume shell is shown; check it in CATIA.",
+            "Watertight test - result", okText: "Clean up", cancelText: "Keep");
+        if (inspect.ShowDialog(this) == DialogResult.OK)
+            CleanUpWatertight(doc, state);
+        else
+            SetStatus($"{verdict} Kept for inspection; click Clean up test when done.");
+    });
+
+    // Makes test seals outside a test. They stay until deleted in CATIA (then Re-catalogue).
+    private void MakeTestSeals() => RunWithState((doc, state) =>
+    {
+        int before = state.WtPlugs.Count;
+        ShowTestSealDialog(doc, state, bodies: null);
+        SetStatus($"Made {state.WtPlugs.Count - before} test seal(s); {state.WtPlugs.Count} in total.");
+    });
+
+    // Opens the test seal dialog; every seal made is stored straight away. With bodies set, the
+    // dialog also offers Test and returns true when it is clicked.
+    private bool ShowTestSealDialog(object doc, PartState state, int? bodies)
+    {
+        using var dialog = new TempPlugsDialog(bodies, state.WtPlugs.Count, () =>
+        {
+            string name = CatiaBodies.NameOf(CatiaWatertight.CreateTempPlug(doc));
+            state.WtPlugs.Add(name);
+            state.Save();
+            return name;
+        });
+        return dialog.ShowDialog(this) == DialogResult.OK;
+    }
+
+    private void SetFlowPoint() => RunWithState((doc, state) =>
+    {
+        if (AskFlowPoint(doc, state))
+            SetStatus("Flow point stored.");
+        else
+            SetStatus(state.WtFlowPoint is null ? "No flow point set." : "Flow point unchanged.");
+    });
+
+    // Asks for a point on the inside surface of the flow volume and stores it. False if cancelled.
+    private bool AskFlowPoint(object doc, PartState state)
+    {
+        using var dialog = new SelectFacesDialog("",
+            "In CATIA, select one point (a vertex or a point feature)\n" +
+            "on the inside surface of the flow volume.\n\n" +
+            "Then click OK.",
+            "Watertight test - flow point");
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return false;
+
+        state.WtFlowPoint = CatiaWatertight.GetSelectedFlowPoint(doc);
+        state.Save();
+        return true;
+    }
+
+    private void CleanUpTest() => RunWithState((doc, state) =>
+    {
+        CleanUpWatertight(doc, state);
+    });
+
+    // Deletes the shells geoset, the union and the copies, and shows the tested bodies and the
+    // test seals again. Test seals are kept.
+    private void CleanUpWatertight(object doc, PartState state)
+    {
+        Progress("Cleaning up the watertight test...");
+        var temporary = new[] { state.WtUnion }.Concat(state.WtCopies).OfType<string>();
+        int deleted = CatiaWatertight.CleanUp(doc, temporary);
+
+        var (shown, _) = Resolve(doc, state.WtBodies.Concat(state.WtPlugs));
+        if (state.WtBodies.Count > 0 && shown.Count > 0)
+            CatiaBodies.ShowExactlyBodies(doc, shown);
+
+        bool hadTest = state.WtActive;
+        state.ClearWatertight();
+        SetStatus(deleted == 0 && !hadTest
+            ? "No watertight test to clean up."
+            : $"Watertight test cleaned up: {deleted} temporary item(s) deleted, " +
+              $"{Bodies(shown.Count)} shown (including {state.WtPlugs.Count} test seal(s)).");
+    }
+
     // ---- Catalogue ----
 
     // Snapshots the part's bodies into the .sqlite3 file (replacing the previous catalogue) and
@@ -487,7 +659,7 @@ internal sealed class MainForm : Form
             string dbPath = PartDb.PathFor(doc);
             var state = PartState.Load(dbPath);
             action(doc, state);
-            state.Save(dbPath);
+            state.Save();
         });
     }
 
@@ -517,4 +689,11 @@ internal sealed class MainForm : Form
     }
 
     private void SetStatus(string message) => _status.Text = message;
+
+    // Shows a message straight away, during a long operation that blocks the UI.
+    private void Progress(string message)
+    {
+        SetStatus(message);
+        _status.Refresh();
+    }
 }

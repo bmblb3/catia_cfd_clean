@@ -5,7 +5,8 @@ namespace CATIA_CFD_Clean;
 // Asks the user to select seal faces in CATIA.
 internal sealed class SelectFacesDialog : Form
 {
-    public SelectFacesDialog(string bodyLabel, string? customInstructions = null, string? title = null)
+    public SelectFacesDialog(string bodyLabel, string? customInstructions = null, string? title = null,
+        string okText = "OK", string cancelText = "Cancel")
     {
         Text = title ?? $"Select seal faces - {bodyLabel}";
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -27,22 +28,111 @@ internal sealed class SelectFacesDialog : Form
 
         var ok = new Button
         {
-            Text = "OK",
+            Text = okText,
             DialogResult = DialogResult.OK,
             Location = new Point(200, 95),
             Size = new Size(80, 30),
         };
         var cancel = new Button
         {
-            Text = "Cancel",
+            Text = cancelText,
             DialogResult = DialogResult.Cancel,
             Location = new Point(288, 95),
             Size = new Size(80, 30),
         };
 
+        // Grow to fit longer messages.
+        int textHeight = TextRenderer.MeasureText(instructions.Text, instructions.Font,
+            new Size(instructions.Width, int.MaxValue), TextFormatFlags.WordBreak).Height;
+        int extra = Math.Max(0, textHeight - instructions.Height);
+        instructions.Height += extra;
+        ok.Top += extra;
+        cancel.Top += extra;
+        ClientSize = new Size(ClientSize.Width, ClientSize.Height + extra);
+
         Controls.AddRange(new Control[] { instructions, ok, cancel });
         AcceptButton = ok;
         CancelButton = cancel;
+    }
+}
+
+// Watertight test: makes test seals (orange plugs) one edge loop at a time. "Next seal" builds a
+// seal from the curves selected in CATIA and keeps the dialog open. With a test to run, "Test"
+// closes it with OK; otherwise only "Close" is offered.
+internal sealed class TempPlugsDialog : Form
+{
+    private readonly Label _state = new() { AutoSize = false };
+    private readonly Func<string> _createPlug;
+    private readonly string _nextStep;
+    private int _plugs;
+
+    // createPlug builds one seal from the current CATIA selection and returns its name.
+    // bodies is the number of bodies under test, or null when only making seals.
+    public TempPlugsDialog(int? bodies, int existingPlugs, Func<string> createPlug)
+    {
+        _createPlug = createPlug;
+        _plugs = existingPlugs;
+        _nextStep = bodies is null ? "Select the next opening, or click Close." : "Select the next opening, or click Test.";
+
+        Text = "Watertight test - test seals";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        TopMost = true;
+        ClientSize = new Size(380, 175);
+
+        var instructions = new Label
+        {
+            Text = (bodies is null ? "" : $"Testing {bodies} bod{(bodies == 1 ? "y" : "ies")} and every test seal.\n") +
+                   "In CATIA, select a closed chain of curves for an opening\n" +
+                   "(Ctrl+click to select several), then click Next seal.\n" +
+                   (bodies is null ? "Click Close when done." : "When every opening is sealed, click Test."),
+            Location = new Point(12, 12),
+            Size = new Size(356, 70),
+        };
+
+        _state.Location = new Point(12, 92);
+        _state.Size = new Size(356, 32);
+        SetState($"{_plugs} test seal(s) so far.", isError: false);
+
+        var next = new Button { Text = "Next seal", Location = new Point(112, 133), Size = new Size(80, 30) };
+        next.Click += (_, _) => NextPlug();
+        var test = new Button { Text = "Test", DialogResult = DialogResult.OK, Location = new Point(200, 133), Size = new Size(80, 30) };
+        var close = new Button { Text = "Close", DialogResult = DialogResult.Cancel, Location = new Point(288, 133), Size = new Size(80, 30) };
+
+        Controls.AddRange(new Control[] { instructions, _state, next, close });
+        if (bodies is not null)
+            Controls.Add(test);
+        else
+            next.Left = test.Left;
+        AcceptButton = next;
+        CancelButton = close;
+    }
+
+    private void NextPlug()
+    {
+        UseWaitCursor = true;
+        try
+        {
+            string name = _createPlug();
+            _plugs++;
+            SetState($"Test seal {_plugs} created ({name}). {_nextStep}", isError: false);
+        }
+        catch (Exception ex)
+        {
+            SetState($"Could not make a test seal: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            UseWaitCursor = false;
+        }
+    }
+
+    private void SetState(string message, bool isError)
+    {
+        _state.Text = message;
+        _state.ForeColor = isError ? Color.Firebrick : SystemColors.GrayText;
     }
 }
 

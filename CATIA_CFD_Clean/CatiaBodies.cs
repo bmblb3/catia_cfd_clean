@@ -207,6 +207,25 @@ internal static class CatiaBodies
         selection.Clear();
     }
 
+    // Shows exactly the given bodies (with their non-helper geosets) and hides every other body.
+    // Top-level geosets are left as they are.
+    public static void ShowExactlyBodies(dynamic doc, IReadOnlyList<object> bodiesToShow)
+    {
+        using var quiet = new QuietDisplay((object)doc);
+        var names = bodiesToShow.Select(NameOf).ToHashSet();
+        dynamic part = doc.Part;
+        int count = part.Bodies.Count;
+        var hide = new List<object>();
+        for (int i = 1; i <= count; i++)
+        {
+            object body = part.Bodies.Item(i);
+            if (!names.Contains(NameOf(body)))
+                hide.Add(body);
+        }
+        SetBodiesShown(doc, hide, false);
+        SetBodiesShown(doc, bodiesToShow, true);
+    }
+
     /// <summary>
     /// Toggles the given bodies as a group. By default: if all are shown they are hidden,
     /// otherwise all are shown. With <paramref name="hideIfAnyShown"/> (the face-toggle rule): if any is
