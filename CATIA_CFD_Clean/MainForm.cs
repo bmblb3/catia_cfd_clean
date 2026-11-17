@@ -363,11 +363,12 @@ internal sealed class MainForm : Form
             // Create with the default thickness. Any previous seal is kept (hidden) until
             // the user confirms, so discarding restores it.
             const double defaultThicknessMm = 3.0;
+            const bool defaultReversed = true;
             object? previous = _seals[slot];
             object seal = CatiaSeals.CreateSealBody(
-                doc, $"Seal body {slot}", faces, defaultThicknessMm, false);
+                doc, $"Seal body {slot}", faces, defaultThicknessMm, defaultReversed);
             _seals[slot] = seal;
-            ShowSealWithContext(doc, slot);
+            // Leave the current view as it is; don't re-show the bodies and seals.
             SetStatus($"Adjusting seal for Body {slot}. Changes update live in CATIA.");
 
             using var adjustDialog = new AdjustSealDialog(
