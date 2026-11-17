@@ -44,15 +44,15 @@ internal sealed class MainForm : Form
         seal.Controls.Add(MakeButton("Store selected body", () => Store(2)), 1, 1);
         seal.Controls.Add(MakeButton("Toggle show body", () => ToggleBody(1)), 0, 2);
         seal.Controls.Add(MakeButton("Toggle show body", () => ToggleBody(2)), 1, 2);
-        seal.Controls.Add(MakeButton("Select seal faces", () => SelectSealFaces(1)), 0, 3);
-        seal.Controls.Add(MakeButton("Select seal faces", () => SelectSealFaces(2)), 1, 3);
-        seal.Controls.Add(MakeButton("Toggle show red seal", () => ToggleSeal(1)), 0, 4);
-        seal.Controls.Add(MakeButton("Toggle show red seal", () => ToggleSeal(2)), 1, 4);
+        seal.Controls.Add(MakeButton("Toggle show red seal", () => ToggleSeal(1)), 0, 3);
+        seal.Controls.Add(MakeButton("Toggle show red seal", () => ToggleSeal(2)), 1, 3);
+        AddSpanning(seal, MakeButton("Use selected faces as seal faces (Body 1 or 2)", SelectSealFaces), 4);
         AddSpanning(seal, MakeButton("Show bodies, seals and plugs together", ShowAssembly), 5);
-        _makeSeal = MakeButton("Make seal (intersect seal 1 and seal 2)", MakeSeal);
+        _makeSeal = MakeButton("Make seal (thicken both, then intersect)", MakeSeal);
         _makeSeal.Enabled = false;
         AddSpanning(seal, _makeSeal, 6);
         AddSpanning(seal, MakeButton("Toggle show green seal", ToggleGreenSeal), 7);
+        AddSpanning(seal, MakeButton("Reset (forget bodies and seals; nothing is deleted)", ResetSealing), 8);
 
         var (plugGroup, plug) = MakeGroup("Plug sealing", 1);
         plug.Controls.Add(MakeButton("Select plug curve", SelectPlugCurve), 0, 0);
@@ -245,59 +245,37 @@ internal sealed class MainForm : Form
         });
     }
 
-    private void SelectSealFaces(int slot)
+    // Takes the faces already selected in CATIA, works out whether they are Body 1's or Body 2's,
+    // and stores them (joined in a hidden geoset) as that body's seal faces. Thickening happens
+    // in Make seal.
+    private void SelectSealFaces()
     {
-        object? body = _bodies[slot];
-        if (body is null)
+        if (_bodies[1] is null && _bodies[2] is null)
         {
-            SetStatus($"Store Body {slot} first.");
+            SetStatus("Store Body 1 and Body 2 first.");
             return;
         }
 
         Run(() =>
         {
             dynamic doc = CatiaConnection.GetActiveDocument();
-            CatiaBodies.ShowOnly(doc, body);
+            var (owner, faces) = ((object, List<object>))CatiaSeals.GetSelectedFaces(doc);
 
-            using var selectDialog = new SelectFacesDialog($"Body {slot}");
-            if (selectDialog.ShowDialog(this) != DialogResult.OK)
+            string ownerName = CatiaBodies.NameOf(owner);
+            int slot = 0;
+            for (int s = 1; s <= 2; s++)
             {
-                SetStatus("Seal creation cancelled.");
+                if (_bodies[s] is { } stored && CatiaBodies.NameOf(stored) == ownerName)
+                    slot = s;
+            }
+            if (slot == 0)
+            {
+                SetStatus($"The selected faces belong to {ownerName}, which is not stored as Body 1 or Body 2.");
                 return;
             }
 
-            List<object> faces = CatiaSeals.GetSelectedFaceReferences(doc, body);
-
-            // Create with the default thickness. Any previous seal is kept (hidden) until
-            // the user confirms, so discarding restores it.
-            const double defaultThicknessMm = 3.0;
-            const bool defaultReversed = true;
             object? previous = _seals[slot];
-            object seal = CatiaSeals.CreateSealBody(
-                doc, $"Seal body {slot}", faces, defaultThicknessMm, defaultReversed);
-            _seals[slot] = seal;
-            // Leave the current view as it is; don't re-show the bodies and seals.
-            SetStatus($"Adjusting seal for Body {slot}. Changes update live in CATIA.");
-
-            using var adjustDialog = new AdjustSealDialog(
-                $"Body {slot}",
-                defaultThicknessMm,
-                distance => CatiaSeals.SetSealThickness(doc, seal, distance),
-                () => CatiaSeals.FlipSeal(doc, seal));
-
-            if (adjustDialog.ShowDialog(this) != DialogResult.OK)
-            {
-                CatiaSeals.TryDelete(doc, seal);
-                _seals[slot] = previous;
-                ShowSealWithContext(doc, slot);
-                SetStatus(previous is null
-                    ? "Seal discarded."
-                    : $"New seal discarded; kept the previous seal for Body {slot}.");
-                return;
-            }
-
-            CatiaSeals.SetBodyColor(doc, seal, CatiaSeals.ConfirmedColor);
-
+            _seals[slot] = CatiaSeals.CreateSealFacesBody(doc, $"Seal body {slot}", faces);
             if (previous is not null)
             {
                 CatiaSeals.TryDelete(doc, previous);
@@ -305,8 +283,11 @@ internal sealed class MainForm : Form
             }
 
             UpdateMakeSealEnabled();
-            string side = adjustDialog.Flipped ? ", flipped" : "";
-            SetStatus($"Seal for Body {slot}: {faces.Count} face(s), {adjustDialog.DistanceMm} mm{side}.");
+            int other = 3 - slot;
+            string next = _seals[other] is null
+                ? $"Now select the seal faces of Body {other}."
+                : "Click Make seal.";
+            SetStatus($"Stored {faces.Count} seal face(s) for Body {slot}. {next}");
         });
     }
 
@@ -409,32 +390,53 @@ internal sealed class MainForm : Form
         });
     }
 
-    private void ShowSealWithContext(dynamic doc, int slot)
+    // Forgets Body 1/2, both seal bodies and the green seal so a new O-I seal can be started.
+    // Only the app's references are cleared; the bodies stay in the CATIA part.
+    private void ResetSealing()
     {
-        // Show both original bodies and both seals so user can see the spatial relationship.
-        var toShow = new List<object>();
-        if (_bodies[1] is not null) toShow.Add(_bodies[1]);
-        if (_bodies[2] is not null) toShow.Add(_bodies[2]);
-        if (_seals[1] is not null) toShow.Add(_seals[1]);
-        if (_seals[2] is not null) toShow.Add(_seals[2]);
+        if (_busy)
+        {
+            SetStatus("Finish the current operation first.");
+            return;
+        }
 
-        if (toShow.Count > 0)
-            CatiaBodies.ShowOnlyBodies(doc, toShow);
+        Array.Clear(_bodies);
+        Array.Clear(_seals);
+        _sealResult = null;
+        UpdateMakeSealEnabled();
+        SetStatus("O-I sealing reset. Existing bodies stay in CATIA. Store a new Body 1 and Body 2.");
     }
 
+    // Thickens each seal body that is not thickened yet (red), then intersects the two (green).
     private void MakeSeal()
     {
         if (_seals[1] is not { } seal1 || _seals[2] is not { } seal2)
         {
-            SetStatus("Both seals are needed first.");
+            SetStatus("Select the seal faces of both bodies first.");
             return;
         }
 
         Run(() =>
         {
             dynamic doc = CatiaConnection.GetActiveDocument();
+            foreach (var (slot, sealBody) in new[] { (1, seal1), (2, seal2) })
+            {
+                if (CatiaSeals.IsThickened(sealBody))
+                    continue;
+                try
+                {
+                    CatiaSeals.ThickenSeal(doc, sealBody);
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        $"Could not thicken the seal faces of Body {slot}. {ex.Message}", ex);
+                }
+            }
+
             _sealResult = CatiaSeals.MakeSeal(doc, seal1, seal2);
-            SetStatus("Seal made: the intersection is a new green body.");
+            SetStatus($"Seal made: both seals thickened ({CatiaSeals.SealMainSideMm} mm / " +
+                $"{CatiaSeals.SealReverseSideMm} mm reversed) and intersected into a green body.");
         });
     }
 

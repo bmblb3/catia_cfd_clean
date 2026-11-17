@@ -6,45 +6,65 @@ internal static class CatiaSeals
 {
     public const string SealFacesGeosetName = "Seal faces";
 
-    // Reads the faces currently selected in CATIA and returns a Reference for each.
-    // Every face must belong to the given body.
-    public static List<object> GetSelectedFaceReferences(dynamic doc, object body)
+    // Seal thickness: a thin skin on the faces' normal side, the bulk on the opposite side.
+    public const double SealMainSideMm = 0.5;
+    public const double SealReverseSideMm = 3.0;
+
+    /// <summary>
+    /// Reads the faces in the current CATIA selection (edges and other items are ignored) and
+    /// the one body that owns them all. Throws if no face is selected or if the faces belong to
+    /// more than one body.
+    /// </summary>
+    public static (object Body, List<object> Faces) GetSelectedFaces(dynamic doc)
     {
         dynamic part = doc.Part;
         dynamic selection = doc.Selection;
         int count = selection.Count;
-        if (count == 0)
-            throw new InvalidOperationException("No faces are selected in CATIA.");
 
-        string bodyName = CatiaBodies.NameOf(body);
+        object? body = null;
+        string? bodyName = null;
         var references = new List<object>();
         for (int i = 1; i <= count; i++)
         {
             dynamic element = selection.Item(i);
 
-            string? type = TryGetType(element);
             // CATIA reports faces as "Face", "PlanarFace", "CylindricalFace", etc.
-            // Anything else (edges, vertices, ...) is ignored.
-            if (type is not null && !type.EndsWith("Face", StringComparison.OrdinalIgnoreCase))
+            string? type = TryGetType(element);
+            if (type is null || !type.EndsWith("Face", StringComparison.OrdinalIgnoreCase))
                 continue;
 
             object value = element.Value;
             var trail = new List<string>();
-            object? owner = CatiaBodies.FindOwningBody(value, trail);
-            if (owner is null || CatiaBodies.NameOf(owner) != bodyName)
+            object owner = CatiaBodies.FindOwningBody(value, trail)
+                ?? throw new InvalidOperationException(
+                    "A selected face does not belong to a body. Chain: " + string.Join(" -> ", trail));
+
+            string ownerName = CatiaBodies.NameOf(owner);
+            if (bodyName is null)
+            {
+                body = owner;
+                bodyName = ownerName;
+            }
+            else if (ownerName != bodyName)
+            {
                 throw new InvalidOperationException(
-                    $"Selected item {i} is not a face of {bodyName}.");
+                    $"The selected faces belong to more than one body ({bodyName}, {ownerName}). " +
+                    "Select faces of one body only.");
+            }
 
             references.Add(GetReference(part, element, value));
         }
-        if (references.Count == 0)
-            throw new InvalidOperationException("No faces are selected in CATIA (other items are ignored).");
-        return references;
+
+        if (body is null)
+            throw new InvalidOperationException("No faces are selected in CATIA. Select the seal faces first.");
+        return (body, references);
     }
 
-    // Creates a new body containing a geoset (joined faces) and a thick surface.
-    public static object CreateSealBody(dynamic doc, string name, IReadOnlyList<object> faces,
-        double distanceMm, bool reverse)
+    /// <summary>
+    /// Creates a new body holding only a hidden geoset with the faces joined into one surface.
+    /// The thick surface is added later by <see cref="ThickenSeal"/>.
+    /// </summary>
+    public static object CreateSealFacesBody(dynamic doc, string name, IReadOnlyList<object> faces)
     {
         dynamic part = doc.Part;
         dynamic newBody = part.Bodies.Add();
@@ -71,22 +91,12 @@ internal static class CatiaSeals
             part.InWorkObject = geoset;
             part.Update();
 
-            dynamic surfaceRef = part.CreateReferenceFromObject(surface);
-            part.InWorkObject = newBody;
-            dynamic thick = part.ShapeFactory.AddNewThickSurface(surfaceRef, 0, distanceMm, 0.0);
-            if (reverse)
-                thick.swap_OffsetSide();
-            part.Update();
-
-            // Hide the geoset (the thick surface still depends on it, so it cannot be deleted).
+            // Hide the geoset (the thick surface will depend on it, so it cannot be deleted).
             dynamic selection = doc.Selection;
             selection.Clear();
             selection.Add(geoset);
             selection.VisProperties.SetShow(1); // catVisPropertyNoShowAttr
             selection.Clear();
-
-            // Pink marks a candidate seal; it turns red once the user confirms it.
-            SetBodyColor(doc, newBody, CandidateColor);
         }
         catch
         {
@@ -95,6 +105,38 @@ internal static class CatiaSeals
         }
 
         return newBody;
+    }
+
+    /// <summary>
+    /// True once the seal body has its thick surface.
+    /// </summary>
+    public static bool IsThickened(object sealBody) => (int)((dynamic)sealBody).Shapes.Count > 0;
+
+    /// <summary>
+    /// Thickens the joined faces of a seal body (<see cref="SealMainSideMm"/> on the normal side,
+    /// <see cref="SealReverseSideMm"/> on the other) and colours the body red.
+    /// </summary>
+    public static void ThickenSeal(dynamic doc, object sealBody)
+    {
+        dynamic part = doc.Part;
+        dynamic body = sealBody;
+        dynamic geoset = body.HybridBodies.Item(SealFacesGeosetName);
+        dynamic surface = geoset.HybridShapes.Item(1);
+
+        dynamic surfaceRef = part.CreateReferenceFromObject(surface);
+        part.InWorkObject = body;
+        dynamic thick = part.ShapeFactory.AddNewThickSurface(surfaceRef, 0, SealMainSideMm, SealReverseSideMm);
+        try
+        {
+            part.Update();
+        }
+        catch
+        {
+            TryDelete(doc, thick); // leave the body unthickened so Make seal can be retried
+            throw;
+        }
+
+        SetBodyColor(doc, sealBody, ConfirmedColor);
     }
 
     public const string PlugFillGeosetName = "Plug fill";
