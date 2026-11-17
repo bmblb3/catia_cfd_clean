@@ -162,6 +162,237 @@ internal static class CatiaBodies
         selection.Clear();
     }
 
+    // Upper bound on items inspected per poll, so a huge selection (e.g. Ctrl+A in the
+    // spec tree) cannot turn each poll into thousands of cross-process COM calls.
+    private const int MaxItemsInspectedPerPoll = 50;
+
+    /// <summary>
+    /// Returns true if at least one of the first few items in the current CATIA selection is
+    /// a face. Reads item types only; intended for the periodic selection poll.
+    /// </summary>
+    public static bool HasSelectedFaces(dynamic doc)
+    {
+        dynamic selection = doc.Selection;
+        int count = Math.Min((int)selection.Count, MaxItemsInspectedPerPoll);
+        for (int i = 1; i <= count; i++)
+        {
+            if (IsFace(selection.Item(i)))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Returns the distinct bodies that own the selected faces. Non-face selections are
+    /// ignored; faces whose owning body cannot be resolved are skipped.
+    /// </summary>
+    public static List<object> GetBodiesOfSelectedFaces(dynamic doc)
+    {
+        dynamic selection = doc.Selection;
+        int count = selection.Count;
+        var bodies = new List<object>();
+        var names = new HashSet<string>();
+        for (int i = 1; i <= count; i++)
+        {
+            dynamic element = selection.Item(i);
+            if (!IsFace(element))
+                continue;
+
+            object? body;
+            try
+            {
+                body = FindOwningBody((object)element.Value, new List<string>());
+            }
+            catch
+            {
+                continue; // face vanished or is not resolvable; skip it
+            }
+
+            if (body is not null && names.Add(NameOf(body)))
+                bodies.Add(body);
+        }
+        return bodies;
+    }
+
+    /// <summary>
+    /// Hides the given bodies but keeps their solid features (Pad, Pocket, Sketch, ...)
+    /// shown, along with the non-helper geosets inside them. This keeps the viewport and the
+    /// spec tree in agreement: the body node is hidden while its solids stay visible.
+    /// </summary>
+    /// <param name="doc">The active CATIA part document.</param>
+    /// <param name="bodiesToHide">Bodies whose own visibility is switched off.</param>
+    public static void HideBodiesKeepSolids(dynamic doc, IReadOnlyList<object> bodiesToHide)
+    {
+        if (bodiesToHide.Count == 0)
+            return;
+
+        dynamic selection = doc.Selection;
+        try
+        {
+            // 1. Hide the bodies themselves.
+            selection.Clear();
+            foreach (object body in bodiesToHide)
+                selection.Add(body);
+            if (selection.Count > 0)
+                selection.VisProperties.SetShow(NoShowAttr);
+            selection.Clear();
+
+            // 2. Explicitly show the solid features and non-helper geosets of each body.
+            foreach (object body in bodiesToHide)
+            {
+                AddSolidsToSelection(selection, body);
+                AddNonHelperGeosetsToSelection(selection, body);
+            }
+            if (selection.Count > 0)
+                selection.VisProperties.SetShow(ShowAttr);
+        }
+        finally
+        {
+            TryClear(selection);
+        }
+    }
+
+    /// <summary>
+    /// Toggles the given bodies: if any is shown, all are hidden (solids kept visible);
+    /// if all are already hidden, all are shown again with their solids and geosets.
+    /// Returns true if the bodies ended up hidden, false if shown.
+    /// </summary>
+    public static bool ToggleBodiesKeepSolids(dynamic doc, IReadOnlyList<object> bodies)
+    {
+        dynamic selection = doc.Selection;
+        bool anyShown = false;
+        try
+        {
+            foreach (object body in bodies)
+            {
+                selection.Clear();
+                selection.Add(body);
+                int show = ShowAttr;
+                selection.VisProperties.GetShow(ref show);
+                if (show == ShowAttr)
+                {
+                    anyShown = true;
+                    break;
+                }
+            }
+        }
+        finally
+        {
+            TryClear(selection);
+        }
+
+        if (anyShown)
+        {
+            HideBodiesKeepSolids(doc, bodies);
+            return true;
+        }
+
+        try
+        {
+            selection.Clear();
+            foreach (object body in bodies)
+            {
+                selection.Add(body);
+                AddSolidsToSelection(selection, body);
+                AddNonHelperGeosetsToSelection(selection, body);
+            }
+            if (selection.Count > 0)
+                selection.VisProperties.SetShow(ShowAttr);
+        }
+        finally
+        {
+            TryClear(selection);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Shows every solid feature (Pad, Pocket, Sketch, ...) of one body. Companion to
+    /// <see cref="HideBodiesKeepSolids"/>; does not change the body's own visibility.
+    /// </summary>
+    /// <param name="doc">The active CATIA part document.</param>
+    /// <param name="body">The body whose solids are shown.</param>
+    public static void ShowAllSolidsInBody(dynamic doc, object body)
+    {
+        dynamic selection = doc.Selection;
+        try
+        {
+            selection.Clear();
+            AddSolidsToSelection(selection, body);
+            if (selection.Count > 0)
+                selection.VisProperties.SetShow(ShowAttr);
+        }
+        finally
+        {
+            TryClear(selection);
+        }
+    }
+
+    // Adds the solid features of a body (Shapes, plus Sketches) to the selection.
+    // Items CATIA refuses to select are skipped individually.
+    private static void AddSolidsToSelection(dynamic selection, object body)
+    {
+        dynamic node = body;
+        foreach (string collectionName in new[] { "Shapes", "Sketches" })
+        {
+            try
+            {
+                dynamic items = collectionName == "Shapes" ? node.Shapes : node.Sketches;
+                int count = items.Count;
+                for (int i = 1; i <= count; i++)
+                {
+                    try { selection.Add(items.Item(i)); }
+                    catch { /* not selectable; skip */ }
+                }
+            }
+            catch
+            {
+                // Collection not available on this body.
+            }
+        }
+    }
+
+    private static void AddNonHelperGeosetsToSelection(dynamic selection, object body)
+    {
+        try
+        {
+            dynamic node = body;
+            int count = node.HybridBodies.Count;
+            for (int i = 1; i <= count; i++)
+            {
+                dynamic geoset = node.HybridBodies.Item(i);
+                if (!CatiaSeals.IsHelperGeoset((string)geoset.Name))
+                {
+                    try { selection.Add(geoset); }
+                    catch { /* skip */ }
+                }
+            }
+        }
+        catch
+        {
+            // Body without geosets.
+        }
+    }
+
+    private static bool IsFace(dynamic selectedElement)
+    {
+        try
+        {
+            // CATIA reports faces as "Face", "PlanarFace", "CylindricalFace", etc.
+            return ((string)selectedElement.Type).EndsWith("Face", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void TryClear(dynamic selection)
+    {
+        try { selection.Clear(); }
+        catch { /* document may have closed */ }
+    }
+
     public static string NameOf(object body)
     {
         dynamic node = body;

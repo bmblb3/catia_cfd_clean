@@ -5,14 +5,59 @@ namespace CATIA_CFD_Clean;
 // Attaches to the already-running CATIA instance through COM.
 internal static class CatiaConnection
 {
+    // Cached application proxy. Looking CATIA up in the running object table is comparatively
+    // slow, and the selection poll calls this many times a second.
+    private static object? _catia;
+
     // Returns the active document of the running CATIA instance.
     public static object GetActiveDocument()
     {
-        dynamic catia = GetRunningCatia("CATIA.Application");
+        dynamic catia = GetApplication();
         if (catia.Documents.Count == 0)
             throw new InvalidOperationException("No document is open in CATIA.");
 
         return catia.ActiveDocument;
+    }
+
+    // Returns the active document, or null if CATIA is not running or has no document open.
+    // Never throws; intended for background polling.
+    public static object? TryGetActiveDocument()
+    {
+        try
+        {
+            dynamic catia = GetApplication();
+            return catia.Documents.Count == 0 ? null : (object)catia.ActiveDocument;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // Returns the cached application if it is still alive, otherwise re-attaches.
+    // A cached proxy goes stale when CATIA is restarted.
+    private static object GetApplication()
+    {
+        if (_catia is not null)
+        {
+            try
+            {
+                dynamic cached = _catia;
+                _ = cached.Name; // cheap liveness probe
+                return _catia;
+            }
+            catch (COMException)
+            {
+                _catia = null;
+            }
+            catch (InvalidComObjectException)
+            {
+                _catia = null;
+            }
+        }
+
+        _catia = GetRunningCatia("CATIA.Application");
+        return _catia;
     }
 
     // Replacement for Marshal.GetActiveObject, which is not available in .NET 5+.
