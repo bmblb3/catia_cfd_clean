@@ -168,25 +168,26 @@ internal static class CatiaBodies
 
     /// <summary>
     /// Returns true if at least one of the first few items in the current CATIA selection is
-    /// a face. Reads item types only; intended for the periodic selection poll.
+    /// a face or a body. Reads item types only; intended for the periodic selection poll.
     /// </summary>
-    public static bool HasSelectedFaces(dynamic doc)
+    public static bool HasToggleableSelection(dynamic doc)
     {
         dynamic selection = doc.Selection;
         int count = Math.Min((int)selection.Count, MaxItemsInspectedPerPoll);
         for (int i = 1; i <= count; i++)
         {
-            if (IsFace(selection.Item(i)))
+            if (IsToggleable(selection.Item(i)))
                 return true;
         }
         return false;
     }
 
     /// <summary>
-    /// Returns the distinct bodies that own the selected faces. Non-face selections are
-    /// ignored; faces whose owning body cannot be resolved are skipped.
+    /// Returns the distinct bodies to toggle: the bodies owning selected faces or solid
+    /// features, plus any selected bodies themselves (e.g. from a rectangle selection).
+    /// Other selections are ignored; items whose owning body cannot be resolved are skipped.
     /// </summary>
-    public static List<object> GetBodiesOfSelectedFaces(dynamic doc)
+    public static List<object> GetBodiesOfSelection(dynamic doc)
     {
         dynamic selection = doc.Selection;
         int count = selection.Count;
@@ -195,17 +196,20 @@ internal static class CatiaBodies
         for (int i = 1; i <= count; i++)
         {
             dynamic element = selection.Item(i);
-            if (!IsFace(element))
-                continue;
-
-            object? body;
+            object? body = null;
             try
             {
-                body = FindOwningBody((object)element.Value, new List<string>());
+                object value = element.Value;
+                if (IsFace(element))
+                    body = FindOwningBody(value, new List<string>());
+                else if (IsBodyObject(value))
+                    body = value;
+                else
+                    body = ResolveSolidFeatureBody(value);
             }
             catch
             {
-                continue; // face vanished or is not resolvable; skip it
+                continue; // item vanished or is not resolvable; skip it
             }
 
             if (body is not null && names.Add(NameOf(body)))
@@ -380,6 +384,51 @@ internal static class CatiaBodies
         {
             // CATIA reports faces as "Face", "PlanarFace", "CylindricalFace", etc.
             return ((string)selectedElement.Type).EndsWith("Face", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // A selection item the F2 toggle acts on: a face, a body itself, or a solid feature
+    // (Pad, Pocket, ...) that belongs to a body.
+    private static bool IsToggleable(dynamic selectedElement)
+    {
+        try
+        {
+            object value = selectedElement.Value;
+            return IsFace(selectedElement) || IsBodyObject(value) || ResolveSolidFeatureBody(value) is not null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // Returns the body owning a solid feature, or null if the item is not one. Sketches and
+    // geometrical sets (HybridBody) inside a body are not solid features, so anything reached
+    // through them is rejected.
+    private static object? ResolveSolidFeatureBody(object value)
+    {
+        var trail = new List<string>();
+        object? body = FindOwningBody(value, trail);
+        if (body is null)
+            return null;
+        foreach (string typeName in trail)
+        {
+            if (typeName is "Sketch" or "HybridBody")
+                return null;
+        }
+        return body;
+    }
+
+    // True if the object is a CATIA body (TypeName "Body"), the same test FindOwningBody uses.
+    private static bool IsBodyObject(object value)
+    {
+        try
+        {
+            return (string)((dynamic)value).TypeName == "Body";
         }
         catch
         {

@@ -66,7 +66,7 @@ internal sealed class MainForm : Form
         plug.Controls.Add(MakeButton("Select plug curve", SelectPlugCurve), 0, 0);
 
         var (visGroup, vis) = MakeGroup("Visibility", 2);
-        vis.Controls.Add(MakeButton("Toggle bodies of selected faces (F2)", () => ToggleSelectedFaces(false)), 0, 0);
+        vis.Controls.Add(MakeButton("Toggle bodies of selected faces or bodies (F2)", () => ToggleSelectedFaces(false)), 0, 0);
         vis.Controls.Add(MakeButton("Show all solids in selected body", ShowSolidsInSelectedBody), 1, 0);
         AddSpanning(vis, _f2State, 1);
 
@@ -200,10 +200,10 @@ internal sealed class MainForm : Form
         Run(() =>
         {
             dynamic doc = CatiaConnection.GetActiveDocument();
-            List<object> bodies = CatiaBodies.GetBodiesOfSelectedFaces(doc);
+            List<object> bodies = CatiaBodies.GetBodiesOfSelection(doc);
             if (bodies.Count == 0)
             {
-                SetStatus("Select one or more faces in CATIA first.");
+                SetStatus("Select one or more faces or bodies in CATIA first.");
                 return;
             }
 
@@ -270,7 +270,7 @@ internal sealed class MainForm : Form
                 {
                     try
                     {
-                        armed = CatiaBodies.HasSelectedFaces(doc);
+                        armed = CatiaBodies.HasToggleableSelection(doc);
                     }
                     catch
                     {
@@ -295,8 +295,8 @@ internal sealed class MainForm : Form
         string text = _f2HookError switch
         {
             -1 => "F2 shortcut starting...",
-            0 when _f2Hook.Armed => "F2 ready: faces are selected in CATIA.",
-            0 => "F2 shortcut: select faces in CATIA, then press F2.",
+            0 when _f2Hook.Armed => "F2 ready: faces or bodies are selected in CATIA.",
+            0 => "F2 shortcut: select faces or bodies in CATIA, then press F2.",
             _ => $"F2 shortcut unavailable (Windows error {_f2HookError}); use the button.",
         };
         if (_f2State.Text != text)
