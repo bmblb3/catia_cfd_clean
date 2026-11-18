@@ -11,6 +11,7 @@ internal sealed class MainForm : Form
     private bool _busy;                                  // a CATIA operation is running
 
     private readonly TableLayoutPanel _root;
+    private readonly ToolTip _tips = new() { AutoPopDelay = 15000 };
 
     private readonly Label _status = new()
     {
@@ -23,47 +24,63 @@ internal sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "CATIA Body Viewer";
+        Text = "CATIA CFD Clean";
         Width = 480;
         StartPosition = FormStartPosition.CenterScreen;
 
-        var (lockGroup, lockGrid) = MakeGroup("Lock view", 2);
-        lockGrid.Controls.Add(MakeButton("Reset to visible", ResetLock), 0, 0);
-        lockGrid.Controls.Add(MakeButton("Append selected", AppendToLock), 1, 0);
-        lockGrid.Controls.Add(MakeButton("Toggle show locked", ToggleLocked), 0, 1);
-        lockGrid.Controls.Add(MakeButton("Toggle show all", ToggleAll), 1, 1);
+        // Sections run in workflow order. Labels stay short; tooltips carry the detail.
+        var (viewGroup, view) = MakeGroup("View", 3);
+        view.Controls.Add(MakeButton("Show/hide selected", ToggleSelectedFaces,
+            "Hides the bodies of the selected faces or bodies, or shows them again if all are hidden."), 0, 0);
+        view.Controls.Add(MakeButton("Show/hide all", ToggleAll,
+            "Hides every body, or shows every body if any is hidden."), 1, 0);
+        view.Controls.Add(MakeButton("Show body's solids", ShowSolidsInSelectedBody,
+            "Shows all solids and geosets inside the selected body."), 2, 0);
 
-        // O-I sealing: one column per body, actions in workflow order.
-        var (sealGroup, seal) = MakeGroup("O-I sealing", 2);
-        seal.Controls.Add(MakeHeader("Body 1"), 0, 0);
-        seal.Controls.Add(MakeHeader("Body 2"), 1, 0);
-        seal.Controls.Add(MakeButton("Store selected body", () => Store(1)), 0, 1);
-        seal.Controls.Add(MakeButton("Store selected body", () => Store(2)), 1, 1);
-        seal.Controls.Add(MakeButton("Toggle show body", () => ToggleBody(1)), 0, 2);
-        seal.Controls.Add(MakeButton("Toggle show body", () => ToggleBody(2)), 1, 2);
-        seal.Controls.Add(MakeButton("Toggle show red seal", () => ToggleSeal(1)), 0, 3);
-        seal.Controls.Add(MakeButton("Toggle show red seal", () => ToggleSeal(2)), 1, 3);
-        AddSpanning(seal, MakeButton("Use selected faces as seal faces (Body 1 or 2)", SelectSealFaces), 4);
-        AddSpanning(seal, MakeButton("Show bodies, seals and plugs together", ShowAssembly), 5);
-        AddSpanning(seal, MakeButton("Make seal (thicken both, then intersect)", MakeSeal), 6);
-        AddSpanning(seal, MakeButton("Toggle show green seal", ToggleGreenSeal), 7);
-        AddSpanning(seal, MakeButton("Reset (forget bodies and seals; nothing is deleted)", ResetSealing), 8);
+        var (lockGroup, lockGrid) = MakeGroup("Lock", 3);
+        lockGrid.Controls.Add(MakeButton("Lock visible", ResetLock,
+            "Replaces the lock with the bodies visible now."), 0, 0);
+        lockGrid.Controls.Add(MakeButton("Add selected", AppendToLock,
+            "Adds the selected bodies to the lock."), 1, 0);
+        lockGrid.Controls.Add(MakeButton("Show/hide locked", ToggleLocked,
+            "Shows or hides the locked bodies; nothing else changes."), 2, 0);
 
-        var (plugGroup, plug) = MakeGroup("Plug sealing", 1);
-        plug.Controls.Add(MakeButton("Select plug curve", SelectPlugCurve), 0, 0);
-
-        var (visGroup, vis) = MakeGroup("Visibility", 2);
-        vis.Controls.Add(MakeButton("Toggle bodies of selected faces or bodies", ToggleSelectedFaces), 0, 0);
-        vis.Controls.Add(MakeButton("Show all solids in selected body", ShowSolidsInSelectedBody), 1, 0);
+        // Seals: O-I seal (one column per body), then plugs, then the view of all seal bodies.
+        var (sealGroup, seal) = MakeGroup("Seals", 2);
+        seal.Controls.Add(MakeHeader("O-I Body 1"), 0, 0);
+        seal.Controls.Add(MakeHeader("O-I Body 2"), 1, 0);
+        for (int slot = 1; slot <= 2; slot++)
+        {
+            int s = slot;
+            seal.Controls.Add(MakeButton("Set to selected", () => Store(s), $"Sets the selected body as Body {s}."), s - 1, 1);
+            seal.Controls.Add(MakeButton("Show/hide body", () => ToggleBody(s)), s - 1, 2);
+            seal.Controls.Add(MakeButton("Show/hide red seal", () => ToggleSeal(s)), s - 1, 3);
+        }
+        AddSpanning(seal, MakeButton("Seal faces from selection", SelectSealFaces,
+            "Stores the selected faces as the seal faces of Body 1 or Body 2 (whichever owns them)."), 4);
+        seal.Controls.Add(MakeButton("Make green seal", MakeSeal,
+            "Thickens both red seals, then intersects them into the green seal."), 0, 5);
+        seal.Controls.Add(MakeButton("Show/hide green seal", ToggleGreenSeal), 1, 5);
+        AddSpanning(seal, MakeButton("Make plug...", MakePlug,
+            "Makes a green plug from a closed chain of curves, with live thickness and side."), 6);
+        seal.Controls.Add(MakeButton("Show only seal bodies", ShowAssembly,
+            "Shows the O-I bodies, red and green seals and plugs; hides everything else."), 0, 7);
+        seal.Controls.Add(MakeButton("Start new O-I seal", ResetSealing,
+            "Forgets Body 1, Body 2 and their seals so a new O-I seal can be made. Nothing is deleted."), 1, 7);
 
         var (wtGroup, wt) = MakeGroup("Watertight test", 2);
-        wt.Controls.Add(MakeButton("Test watertight (visible bodies)", TestWatertight), 0, 0);
-        wt.Controls.Add(MakeButton("Make test seal", MakeTestSeals), 1, 0);
-        wt.Controls.Add(MakeButton("Set flow point", SetFlowPoint), 0, 1);
-        wt.Controls.Add(MakeButton("Clean up test", CleanUpTest), 1, 1);
+        wt.Controls.Add(MakeButton("Set flow point...", SetFlowPoint,
+            "Picks a point on the inside surface of the flow volume. Kept between tests."), 0, 0);
+        wt.Controls.Add(MakeButton("Add test seals...", MakeTestSeals,
+            "Makes orange test seals over openings. Kept until deleted in CATIA."), 1, 0);
+        wt.Controls.Add(MakeButton("Run test...", TestWatertight,
+            "Tests the visible bodies plus every test seal for leaks into the flow volume."), 0, 1);
+        wt.Controls.Add(MakeButton("Clean up test", CleanUpTest,
+            "Deletes the test's temporary bodies and shows the tested bodies again. Test seals are kept."), 1, 1);
 
-        var (catGroup, cat) = MakeGroup("Catalogue", 1);
-        cat.Controls.Add(MakeButton("Re-catalogue part (after deleting or undoing in CATIA)", Recatalogue), 0, 0);
+        var (partGroup, part) = MakeGroup("Part", 1);
+        part.Controls.Add(MakeButton("Re-catalogue part", Recatalogue,
+            "Re-reads the part's bodies and forgets stored ones that are gone. Use after deleting or undoing in CATIA."), 0, 0);
 
         _root = new TableLayoutPanel
         {
@@ -73,7 +90,7 @@ internal sealed class MainForm : Form
             AutoScroll = true,
         };
         _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        GroupBox[] groups = { lockGroup, sealGroup, plugGroup, visGroup, wtGroup, catGroup };
+        GroupBox[] groups = { viewGroup, lockGroup, sealGroup, wtGroup, partGroup };
         for (int i = 0; i < groups.Length; i++)
         {
             _root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -84,7 +101,7 @@ internal sealed class MainForm : Form
         Controls.Add(_root);
         Controls.Add(_status);
 
-        SetStatus("Select a body in CATIA, then click a Store button.");
+        SetStatus("Ready. Hover over a button to see what it does.");
     }
 
     // ---- Layout helpers ----
@@ -130,7 +147,7 @@ internal sealed class MainForm : Form
         Margin = new Padding(4, 2, 4, 0),
     };
 
-    private static Button MakeButton(string text, Action onClick)
+    private Button MakeButton(string text, Action onClick, string? tip = null)
     {
         var button = new Button
         {
@@ -140,6 +157,8 @@ internal sealed class MainForm : Form
             MinimumSize = new Size(0, 34),
         };
         button.Click += (_, _) => onClick();
+        if (tip is not null)
+            _tips.SetToolTip(button, tip);
         return button;
     }
 
@@ -239,7 +258,7 @@ internal sealed class MainForm : Form
     {
         if (state.Locked.Count == 0)
         {
-            SetStatus("The lock is empty. Use Reset to visible or Append selected first.");
+            SetStatus("The lock is empty. Use Lock visible or Add selected first.");
             return;
         }
 
@@ -267,11 +286,11 @@ internal sealed class MainForm : Form
         }
 
         state.Bodies[slot] = CatiaBodies.NameOf(body);
-        SetStatus($"Stored {state.Bodies[slot]} as Body {slot}.");
+        SetStatus($"Set {state.Bodies[slot]} as Body {slot}.");
     });
 
     private void ToggleBody(int slot) =>
-        ToggleStored(s => s.Bodies[slot], $"Body {slot}", $"Body {slot} is not stored yet.");
+        ToggleStored(s => s.Bodies[slot], $"Body {slot}", $"Body {slot} is not set yet.");
 
     private void ToggleSeal(int slot) =>
         ToggleStored(s => s.Seals[slot], $"red seal {slot}", $"No seal created for Body {slot} yet.");
@@ -303,12 +322,12 @@ internal sealed class MainForm : Form
 
     // Takes the faces already selected in CATIA, works out whether they are Body 1's or Body 2's,
     // and stores them (joined in a hidden geoset) as that body's seal faces. Thickening happens
-    // in Make seal.
+    // in Make green seal.
     private void SelectSealFaces() => RunWithState((doc, state) =>
     {
         if (state.Bodies[1] is null && state.Bodies[2] is null)
         {
-            SetStatus("Store Body 1 and Body 2 first.");
+            SetStatus("Set Body 1 and Body 2 first.");
             return;
         }
 
@@ -317,7 +336,7 @@ internal sealed class MainForm : Form
         int slot = state.Bodies[2] == ownerName ? 2 : state.Bodies[1] == ownerName ? 1 : 0;
         if (slot == 0)
         {
-            SetStatus($"The selected faces belong to {ownerName}, which is not stored as Body 1 or Body 2.");
+            SetStatus($"The selected faces belong to {ownerName}, which is not set as Body 1 or Body 2.");
             return;
         }
 
@@ -334,7 +353,7 @@ internal sealed class MainForm : Form
         int other = 3 - slot;
         string next = state.Seals[other] is null
             ? $"Now select the seal faces of Body {other}."
-            : "Click Make seal.";
+            : "Click Make green seal.";
         SetStatus($"Stored {faces.Count} seal face(s) for Body {slot}. {next}");
     });
 
@@ -399,19 +418,19 @@ internal sealed class MainForm : Form
         Array.Clear(state.Bodies);
         Array.Clear(state.Seals);
         state.Result = null;
-        SetStatus("O-I sealing reset. Existing bodies stay in CATIA. Store a new Body 1 and Body 2.");
+        SetStatus("Started a new O-I seal. Existing bodies stay in CATIA. Set a new Body 1 and Body 2.");
     });
 
     // ---- Plugs ----
 
-    private void SelectPlugCurve() => RunWithState((doc, state) =>
+    private void MakePlug() => RunWithState((doc, state) =>
     {
         using var selectDialog = new SelectFacesDialog(
             "plug",
             "In CATIA, select a closed chain of curves\n" +
             "(Ctrl+click to select several).\n\n" +
             "Then click OK.",
-            "Select plug curve");
+            "Make plug");
         if (selectDialog.ShowDialog(this) != DialogResult.OK)
         {
             SetStatus("Plug creation cancelled.");
@@ -482,7 +501,7 @@ internal sealed class MainForm : Form
         if (!ShowTestSealDialog(doc, state, state.WtBodies.Count))
         {
             SetStatus($"Test paused with {state.WtPlugs.Count} test seal(s). " +
-                      "Click Test watertight to continue, or Clean up test.");
+                      "Click Run test to continue, or Clean up test.");
             return;
         }
 

@@ -132,7 +132,7 @@ internal static class CatiaSeals
         }
         catch
         {
-            TryDelete(doc, thick); // leave the body unthickened so Make seal can be retried
+            TryDelete(doc, thick); // leave the body unthickened so Make green seal can be retried
             throw;
         }
 
