@@ -4,28 +4,16 @@ using System.Reflection;
 namespace CATIA_CFD_Clean;
 
 /// <summary>
-/// Watertightness test. The bodies under test and the test seals (orange plugs) are copied as
+/// Watertightness test. The bodies under test (including any visible test seals) are copied as
 /// isolated solids (no link to the originals), the copies are unioned in a temporary body, and the
 /// shell of the union's boundary that holds the flow point is extracted into a temporary geoset.
 /// A watertight flow volume is a shell of its own; a leak merges it with the outer skin. The original bodies are never modified. <see cref="CleanUp"/> removes the
-/// geoset, the union and the copies; test seals are kept for later tests.
+/// geoset, the union and the copies.
 /// </summary>
 internal static class CatiaWatertight
 {
     public const string ShellsGeosetName = "Watertight test shells";
-    public const double TempPlugMm = 2.0;    // test seal thickness on each side of the fill
-    public static readonly (int R, int G, int B) TempPlugColor = (255, 160, 0); // orange
-
     private const int NoPropagation = 3;     // CATGSMExtractPropagationType
-
-    // Makes a test seal (orange plug) from the curves selected in CATIA (same geometry as a normal plug).
-    public static object CreateTempPlug(dynamic doc)
-    {
-        List<object> curves = CatiaSeals.GetSelectedCurveReferences(doc);
-        object plug = CatiaSeals.CreatePlugBody(doc, CatiaSeals.NextKey(doc), curves, TempPlugMm, false, TempPlugMm);
-        CatiaSeals.SetBodyColor(doc, plug, TempPlugColor);
-        return plug;
-    }
 
     // True for a body with no features (such as an unused PartBody): it has no solid to copy.
     public static bool IsEmpty(object body) => (int)((dynamic)body).Shapes.Count == 0;
@@ -109,11 +97,10 @@ internal static class CatiaWatertight
 
     /// <summary>
     /// Returns the coordinates (mm) of the one point selected in CATIA (a vertex or a point
-    /// feature). Anything else is refused.
+    /// feature). Anything else is refused with the message <paramref name="ask"/>.
     /// </summary>
-    public static double[] GetSelectedFlowPoint(dynamic doc)
+    public static double[] GetSelectedPoint(dynamic doc, string ask)
     {
-        const string ask = "Select exactly one point (a vertex or a point feature) on the inside surface of the flow volume.";
         dynamic selection = doc.Selection;
         if ((int)selection.Count != 1)
             throw new InvalidOperationException(ask);

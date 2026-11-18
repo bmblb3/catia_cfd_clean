@@ -8,7 +8,7 @@ internal static class CatiaSeals
 
     // Seal thickness: a thin skin on the faces' normal side, the bulk on the opposite side.
     public const double SealMainSideMm = 0.5;
-    public const double SealReverseSideMm = 3.0;
+    public const double SealReverseSideMm = 5.0;
 
     /// <summary>
     /// Reads the faces in the current CATIA selection (edges and other items are ignored) and
@@ -142,8 +142,58 @@ internal static class CatiaSeals
     public const string PlugFillGeosetName = "Plug fill";
     private const double PlugExtrapolateMm = 0.5;
 
+    public const string SphereGeosetName = "Sphere";
+
     public static bool IsHelperGeoset(string name) =>
-        name == SealFacesGeosetName || name == PlugFillGeosetName;
+        name == SealFacesGeosetName || name == PlugFillGeosetName || name == SphereGeosetName;
+
+    // Creates a new body holding a solid sphere: a hidden geoset with the centre point and the
+    // sphere surface, closed into a solid in the body.
+    public static object CreateSphereBody(dynamic doc, string name, double[] centre, double radiusMm)
+    {
+        dynamic part = doc.Part;
+        dynamic newBody = part.Bodies.Add();
+        newBody.Name = name;
+
+        try
+        {
+            dynamic geoset = newBody.HybridBodies.Add();
+            geoset.Name = SphereGeosetName;
+
+            dynamic hsf = part.HybridShapeFactory;
+            dynamic point = hsf.AddNewPointCoord(centre[0], centre[1], centre[2]);
+            geoset.AppendHybridShape(point);
+
+            // The axis must be a real reference or a COM null (VBA's Nothing); a plain C# null
+            // is refused. Use the part's first axis system when it has one.
+            object axis = (int)part.AxisSystems.Count > 0
+                ? part.CreateReferenceFromObject(part.AxisSystems.Item(1))
+                : new System.Runtime.InteropServices.DispatchWrapper(null);
+            dynamic sphere = hsf.AddNewSphere(part.CreateReferenceFromObject(point), axis,
+                radiusMm, -45.0, 45.0, 0.0, 180.0);
+            sphere.Limitation = 1; // whole sphere (the angles are ignored)
+            geoset.AppendHybridShape(sphere);
+            part.InWorkObject = geoset;
+            part.Update();
+
+            part.InWorkObject = newBody;
+            part.ShapeFactory.AddNewCloseSurface(part.CreateReferenceFromObject(sphere));
+            part.Update();
+
+            dynamic selection = doc.Selection;
+            selection.Clear();
+            selection.Add(geoset);
+            selection.VisProperties.SetShow(1);
+            selection.Clear();
+        }
+        catch
+        {
+            TryDelete(doc, newBody);
+            throw;
+        }
+
+        return newBody;
+    }
 
     // Reads the curves/edges currently selected in CATIA and returns a Reference for each.
     public static List<object> GetSelectedCurveReferences(dynamic doc)
@@ -166,9 +216,9 @@ internal static class CatiaSeals
 
     // Creates a new body with a hidden geoset holding a Fill of the closed curve chain,
     // extrapolated 0.5 mm past its boundary, and a thick surface of that in the body:
-    // distanceMm on one side, otherSideMm on the other.
+    // distanceMm thick on one side.
     public static object CreatePlugBody(dynamic doc, string name, IReadOnlyList<object> curves,
-        double distanceMm, bool reverse, double otherSideMm = 0.0)
+        double distanceMm, bool reverse)
     {
         dynamic part = doc.Part;
         dynamic newBody = part.Bodies.Add();
@@ -220,7 +270,7 @@ internal static class CatiaSeals
 
             dynamic plugSurfaceRef = part.CreateReferenceFromObject(extrapol);
             part.InWorkObject = newBody;
-            dynamic thick = part.ShapeFactory.AddNewThickSurface(plugSurfaceRef, 0, distanceMm, otherSideMm);
+            dynamic thick = part.ShapeFactory.AddNewThickSurface(plugSurfaceRef, 0, distanceMm, 0.0);
             if (reverse)
                 thick.swap_OffsetSide();
             part.Update();
@@ -240,14 +290,6 @@ internal static class CatiaSeals
         }
 
         return newBody;
-    }
-
-    // Changes the thickness of an existing seal body in place (no rebuild).
-    public static void SetSealThickness(dynamic doc, object sealBody, double distanceMm)
-    {
-        dynamic thick = GetThickSurface(sealBody);
-        thick.TopOffset.Value = distanceMm;
-        doc.Part.Update();
     }
 
     // Flips an existing seal body to the other side of its faces.
@@ -326,6 +368,7 @@ internal static class CatiaSeals
     public static readonly (int R, int G, int B) CandidateColor = (255, 150, 200); // pink
     public static readonly (int R, int G, int B) ConfirmedColor = (255, 0, 0);     // red
     public static readonly (int R, int G, int B) ResultColor = (0, 255, 0);        // green
+    public static readonly (int R, int G, int B) TestSealColor = (255, 160, 0);    // orange
 
     // Colours a body. With includeFeatures, its features are coloured too (boolean
     // features otherwise keep their operands' colour). Never use includeFeatures on

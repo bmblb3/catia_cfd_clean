@@ -67,27 +67,6 @@ internal static class CatiaBodies
         return body;
     }
 
-    // Returns the distinct bodies owning every item in the current selection.
-    public static List<object> GetSelectedBodies(dynamic doc)
-    {
-        dynamic selection = doc.Selection;
-        int count = selection.Count;
-        var bodies = new List<object>();
-        var names = new HashSet<string>();
-        for (int i = 1; i <= count; i++)
-        {
-            object item = selection.Item(i).Value;
-            var trail = new List<string>();
-            object? body = FindOwningBody(item, trail);
-            if (body is null)
-                throw new InvalidOperationException(
-                    $"Selected item {i} does not belong to a body. Chain: " + string.Join(" -> ", trail));
-            if (names.Add(NameOf(body)))
-                bodies.Add(body);
-        }
-        return bodies;
-    }
-
     // Returns the bodies of the part that are currently shown.
     public static List<object> GetVisibleBodies(dynamic doc) =>
         GetBodiesWithVisibility((object)doc).Where(b => b.Shown).Select(b => b.Body).ToList();
@@ -111,100 +90,6 @@ internal static class CatiaBodies
             bodies.Add((body, show == ShowAttr));
         }
         return bodies;
-    }
-
-    // Hides every body in the part, then shows only the given body.
-    public static void ShowOnly(dynamic doc, object body)
-    {
-        using var quiet = new QuietDisplay((object)doc);
-        dynamic part = doc.Part;
-        dynamic selection = doc.Selection;
-        int count = part.Bodies.Count;
-
-        selection.Clear();
-        for (int i = 1; i <= count; i++)
-            selection.Add(part.Bodies.Item(i));
-        if (count > 0)
-            selection.VisProperties.SetShow(NoShowAttr);
-        selection.Clear();
-
-        selection.Add(body);
-        selection.VisProperties.SetShow(ShowAttr);
-        selection.Clear();
-
-        // Geometrical sets inside the body are shown with it, except the seal's helper surface.
-        try
-        {
-            dynamic body_ = body;
-            int geosets = body_.HybridBodies.Count;
-            var sealGeosets = new List<object>();
-            for (int i = 1; i <= geosets; i++)
-            {
-                dynamic geoset = body_.HybridBodies.Item(i);
-                if (CatiaSeals.IsHelperGeoset((string)geoset.Name))
-                    sealGeosets.Add(geoset);
-                else
-                    selection.Add(geoset);
-            }
-            if (selection.Count > 0)
-                selection.VisProperties.SetShow(ShowAttr);
-            selection.Clear();
-
-            foreach (object geoset in sealGeosets)
-                selection.Add(geoset);
-            if (sealGeosets.Count > 0)
-                selection.VisProperties.SetShow(NoShowAttr);
-        }
-        catch
-        {
-            // Bodies without geosets: nothing more to show.
-        }
-        selection.Clear();
-    }
-
-    // Shows exactly the given bodies (and the geosets inside them) and hides
-    // everything else: all other bodies, including PartBody, and top-level geosets.
-    public static void ShowOnlyBodies(dynamic doc, IReadOnlyList<object> bodiesToShow)
-    {
-        using var quiet = new QuietDisplay((object)doc);
-        dynamic part = doc.Part;
-        dynamic selection = doc.Selection;
-
-        // Hide everything first.
-        selection.Clear();
-        int bodyCount = part.Bodies.Count;
-        for (int i = 1; i <= bodyCount; i++)
-        {
-            dynamic body = part.Bodies.Item(i);
-            selection.Add(body);
-
-            int geosets = body.HybridBodies.Count;
-            for (int j = 1; j <= geosets; j++)
-                selection.Add(body.HybridBodies.Item(j));
-        }
-        int topLevelGeosets = part.HybridBodies.Count;
-        for (int i = 1; i <= topLevelGeosets; i++)
-            selection.Add(part.HybridBodies.Item(i));
-        if (selection.Count > 0)
-            selection.VisProperties.SetShow(NoShowAttr);
-        selection.Clear();
-
-        // Then show only the wanted bodies and their geosets.
-        foreach (object body in bodiesToShow)
-        {
-            dynamic node = body;
-            selection.Add(node);
-            int geosets = node.HybridBodies.Count;
-            for (int j = 1; j <= geosets; j++)
-            {
-                dynamic geoset = node.HybridBodies.Item(j);
-                if (!CatiaSeals.IsHelperGeoset((string)geoset.Name))
-                    selection.Add(geoset);
-            }
-        }
-        if (selection.Count > 0)
-            selection.VisProperties.SetShow(ShowAttr);
-        selection.Clear();
     }
 
     // Shows exactly the given bodies (with their non-helper geosets) and hides every other body.
@@ -239,6 +124,22 @@ internal static class CatiaBodies
         bool show = hideIfAnyShown ? !AnyShown(doc, bodies) : !AllShown(doc, bodies);
         SetBodiesShown(doc, bodies, show);
         return show;
+    }
+
+    /// <summary>
+    /// Moves two bodies to the next visibility state in the cycle: only A, both, only B, neither.
+    /// The current state is read from CATIA. Returns which ended up shown.
+    /// </summary>
+    public static (bool A, bool B) CycleTwo(dynamic doc, object a, object b)
+    {
+        (bool, bool)[] cycle = { (true, false), (true, true), (false, true), (false, false) };
+        using var quiet = new QuietDisplay((object)doc);
+        // Typed explicitly: with a dynamic doc the calls return dynamic and the lookup never matches.
+        (bool, bool) now = (AllShown(doc, new[] { a }), AllShown(doc, new[] { b }));
+        var next = cycle[(Array.IndexOf(cycle, now) + 1) % cycle.Length];
+        SetBodiesShown(doc, new[] { a }, next.Item1);
+        SetBodiesShown(doc, new[] { b }, next.Item2);
+        return next;
     }
 
     // True if at least one given body is shown. Stops at the first shown one.

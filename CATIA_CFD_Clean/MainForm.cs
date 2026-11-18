@@ -40,43 +40,37 @@ internal sealed class MainForm : Form
         var (lockGroup, lockGrid) = MakeGroup("Lock", 3);
         lockGrid.Controls.Add(MakeButton("Lock visible", ResetLock,
             "Replaces the lock with the bodies visible now."), 0, 0);
-        lockGrid.Controls.Add(MakeButton("Add selected", AppendToLock,
-            "Adds the selected bodies to the lock."), 1, 0);
+        lockGrid.Controls.Add(MakeButton("Add visible", AppendToLock,
+            "Adds the bodies visible now to the lock, keeping those already in it."), 1, 0);
         lockGrid.Controls.Add(MakeButton("Show/hide locked", ToggleLocked,
             "Shows or hides the locked bodies; nothing else changes."), 2, 0);
 
-        // Seals: O-I seal (one column per body), then plugs, then the view of all seal bodies.
+        // Every button acts on the current CATIA selection or stored state in one step; no wizards.
         var (sealGroup, seal) = MakeGroup("Seals", 2);
-        seal.Controls.Add(MakeHeader("O-I Body 1"), 0, 0);
-        seal.Controls.Add(MakeHeader("O-I Body 2"), 1, 0);
-        for (int slot = 1; slot <= 2; slot++)
-        {
-            int s = slot;
-            seal.Controls.Add(MakeButton("Set to selected", () => Store(s), $"Sets the selected body as Body {s}."), s - 1, 1);
-            seal.Controls.Add(MakeButton("Show/hide body", () => ToggleBody(s)), s - 1, 2);
-            seal.Controls.Add(MakeButton("Show/hide red seal", () => ToggleSeal(s)), s - 1, 3);
-        }
+        AddSpanning(seal, MakeButton("Set O-I bodies from selection", SetOiBodies,
+            "Select two bodies (or faces of two bodies). They become Body 1 and Body 2. " +
+            "Starts a new O-I seal: the previous red and green seals are forgotten (nothing is deleted)."), 0);
+        AddSpanning(seal, MakeButton("Cycle O-I bodies: 1, both, 2, none", CycleBodies,
+            "Each click moves to the next: only Body 1, both, only Body 2, neither."), 1);
         AddSpanning(seal, MakeButton("Seal faces from selection", SelectSealFaces,
-            "Stores the selected faces as the seal faces of Body 1 or Body 2 (whichever owns them)."), 4);
-        seal.Controls.Add(MakeButton("Make green seal", MakeSeal,
-            "Thickens both red seals, then intersects them into the green seal."), 0, 5);
-        seal.Controls.Add(MakeButton("Show/hide green seal", ToggleGreenSeal), 1, 5);
-        AddSpanning(seal, MakeButton("Make plug...", MakePlug,
-            "Makes a green plug from a closed chain of curves, with live thickness and side."), 6);
-        seal.Controls.Add(MakeButton("Show only seal bodies", ShowAssembly,
-            "Shows the O-I bodies, red and green seals and plugs; hides everything else."), 0, 7);
-        seal.Controls.Add(MakeButton("Start new O-I seal", ResetSealing,
-            "Forgets Body 1, Body 2 and their seals so a new O-I seal can be made. Nothing is deleted."), 1, 7);
-
+            "Stores the selected faces as the red seal of Body 1 or Body 2 (whichever owns them)."), 2);
+        AddSpanning(seal, MakeButton("Make green seal", MakeSeal,
+            "Thickens both red seals, then intersects them into the green seal."), 3);
+        seal.Controls.Add(MakeButton("Plug from selection", MakePlug,
+            $"Makes a {PlugMm} mm green plug from the selected closed chain of curves."), 0, 4);
+        seal.Controls.Add(MakeButton("Sphere from point", MakeSphere,
+            $"Makes a green sphere plug of {SphereRadiusMm} mm radius centred on the selected point."), 1, 4);
+        AddSpanning(seal, MakeButton("Flip selected plug", FlipPlug,
+            "Moves the selected plug or test seal to the other side of its curves."), 5);
         var (wtGroup, wt) = MakeGroup("Watertight test", 2);
-        wt.Controls.Add(MakeButton("Set flow point...", SetFlowPoint,
-            "Picks a point on the inside surface of the flow volume. Kept between tests."), 0, 0);
-        wt.Controls.Add(MakeButton("Add test seals...", MakeTestSeals,
-            "Makes orange test seals over openings. Kept until deleted in CATIA."), 1, 0);
-        wt.Controls.Add(MakeButton("Run test...", TestWatertight,
-            "Tests the visible bodies plus every test seal for leaks into the flow volume."), 0, 1);
+        wt.Controls.Add(MakeButton("Flow point from selection", SetFlowPoint,
+            "Stores the selected point (on the inside surface of the flow volume). Kept between tests."), 0, 0);
+        wt.Controls.Add(MakeButton("Plug ↔ test seal", ToggleTestSeal,
+            "Turns the selected green plug into an orange test seal, or a test seal back into a plug."), 1, 0);
+        wt.Controls.Add(MakeButton("Run test", TestWatertight,
+            "Tests whether the visible bodies seal the flow volume. Cleans up any previous test first."), 0, 1);
         wt.Controls.Add(MakeButton("Clean up test", CleanUpTest,
-            "Deletes the test's temporary bodies and shows the tested bodies again. Test seals are kept."), 1, 1);
+            "Deletes the test's temporary bodies and shows the tested bodies again."), 1, 1);
 
         var (partGroup, part) = MakeGroup("Part", 1);
         part.Controls.Add(MakeButton("Re-catalogue part", Recatalogue,
@@ -136,16 +130,6 @@ internal sealed class MainForm : Form
         grid.Controls.Add(control, 0, row);
         grid.SetColumnSpan(control, grid.ColumnCount);
     }
-
-    private static Label MakeHeader(string text) => new()
-    {
-        Text = text,
-        Dock = DockStyle.Fill,
-        AutoSize = true,
-        TextAlign = ContentAlignment.MiddleCenter,
-        Font = new Font(SystemFonts.MessageBoxFont ?? DefaultFont, FontStyle.Bold),
-        Margin = new Padding(4, 2, 4, 0),
-    };
 
     private Button MakeButton(string text, Action onClick, string? tip = null)
     {
@@ -235,30 +219,17 @@ internal sealed class MainForm : Form
 
     private void AppendToLock() => RunWithState((doc, state) =>
     {
-        List<object> selected = CatiaBodies.GetSelectedBodies(doc);
-        if (selected.Count == 0)
-        {
-            SetStatus("Select one or more bodies in CATIA first.");
-            return;
-        }
-
-        int added = 0;
-        foreach (string name in selected.Select(CatiaBodies.NameOf))
-        {
-            if (!state.Locked.Contains(name))
-            {
-                state.Locked.Add(name);
-                added++;
-            }
-        }
-        SetStatus($"Added {Bodies(added)} to the lock ({state.Locked.Count} total).");
+        var added = CatiaBodies.GetVisibleBodies(doc).Select(CatiaBodies.NameOf)
+            .Distinct().Except(state.Locked).ToList();
+        state.Locked.AddRange(added);
+        SetStatus($"Added {Bodies(added.Count)} to the lock ({state.Locked.Count} total).");
     });
 
     private void ToggleLocked() => RunWithState((doc, state) =>
     {
         if (state.Locked.Count == 0)
         {
-            SetStatus("The lock is empty. Use Lock visible or Add selected first.");
+            SetStatus("The lock is empty. Use Lock visible or Add visible first.");
             return;
         }
 
@@ -276,49 +247,49 @@ internal sealed class MainForm : Form
 
     // ---- O-I sealing ----
 
-    private void Store(int slot) => RunWithState((doc, state) =>
+    // Sets Body 1 and Body 2 from a selection that resolves to exactly two bodies, starting a new
+    // O-I seal: every previous O-I reference is dropped (the bodies stay in CATIA).
+    private void SetOiBodies() => RunWithState((doc, state) =>
     {
-        object? body = CatiaBodies.GetSelectedBody(doc);
-        if (body is null)
+        var names = CatiaBodies.GetBodiesOfSelection(doc).Select(CatiaBodies.NameOf).ToList();
+        if (names.Count != 2)
         {
-            SetStatus("Select a body in CATIA first.");
+            SetStatus($"Select exactly two bodies (or faces of two bodies); the selection resolves to {Bodies(names.Count)}.");
             return;
         }
 
-        state.Bodies[slot] = CatiaBodies.NameOf(body);
-        SetStatus($"Set {state.Bodies[slot]} as Body {slot}.");
+        Array.Clear(state.Seals);
+        state.Result = null;
+        state.Bodies[1] = names[0];
+        state.Bodies[2] = names[1];
+        SetStatus($"New O-I seal: Body 1 {names[0]}, Body 2 {names[1]}. Now select the seal faces.");
     });
 
-    private void ToggleBody(int slot) =>
-        ToggleStored(s => s.Bodies[slot], $"Body {slot}", $"Body {slot} is not set yet.");
-
-    private void ToggleSeal(int slot) =>
-        ToggleStored(s => s.Seals[slot], $"red seal {slot}", $"No seal created for Body {slot} yet.");
-
-    private void ToggleGreenSeal() =>
-        ToggleStored(s => s.Result, "the green seal", "The green seal has not been made yet.");
-
-    // Flips one stored body's visibility without touching anything else in the part.
-    private void ToggleStored(Func<PartState, string?> pick, string label, string notStoredMessage) =>
-        RunWithState((doc, state) =>
+    private void CycleBodies() => RunWithState((doc, state) =>
+    {
+        if (state.Bodies[1] is null || state.Bodies[2] is null)
         {
-            string? name = pick(state);
-            if (name is null)
-            {
-                SetStatus(notStoredMessage);
-                return;
-            }
+            SetStatus("Set the O-I bodies first.");
+            return;
+        }
 
-            object? body = CatiaBodies.FindBody(doc, name);
-            if (body is null)
-            {
-                SetStatus($"{name} ({label}) is missing from the part. Re-catalogue to forget it.");
-                return;
-            }
+        var (found, missing) = Resolve(doc, state.Bodies);
+        if (missing > 0)
+        {
+            SetStatus("An O-I body is missing from the part." + MissingNote(missing));
+            return;
+        }
 
-            bool shown = CatiaBodies.ToggleBodies(doc, new[] { body });
-            SetStatus($"{(shown ? "Showed" : "Hid")} {label}.");
+        var (one, two) = CatiaBodies.CycleTwo(doc, found[0], found[1]);
+        SetStatus((one, two) switch
+        {
+            (true, true) => "Showing both O-I bodies.",
+            (true, false) => "Showing Body 1 only.",
+            (false, true) => "Showing Body 2 only.",
+            _ => "Both O-I bodies hidden.",
         });
+    });
+
 
     // Takes the faces already selected in CATIA, works out whether they are Body 1's or Body 2's,
     // and stores them (joined in a hidden geoset) as that body's seal faces. Thickening happens
@@ -327,7 +298,7 @@ internal sealed class MainForm : Form
     {
         if (state.Bodies[1] is null && state.Bodies[2] is null)
         {
-            SetStatus("Set Body 1 and Body 2 first.");
+            SetStatus("Set the O-I bodies first.");
             return;
         }
 
@@ -394,131 +365,100 @@ internal sealed class MainForm : Form
             $"{CatiaSeals.SealReverseSideMm} mm reversed) and intersected into a green body.");
     });
 
-    // Shows Body 1, Body 2, both seal bodies, the final Seal and the plugs (whichever exist),
-    // and hides everything else, including PartBody.
-    private void ShowAssembly() => RunWithState((doc, state) =>
-    {
-        var names = new[] { state.Bodies[1], state.Bodies[2], state.Seals[1], state.Seals[2], state.Result }
-            .Concat(state.Plugs.Select(p => p.Name));
-        var (toShow, missing) = Resolve(doc, names);
-        if (toShow.Count == 0)
-        {
-            SetStatus("Nothing stored yet." + MissingNote(missing));
-            return;
-        }
-
-        CatiaBodies.ShowOnlyBodies(doc, toShow);
-        SetStatus($"Showing {toShow.Count} bodies together; everything else hidden." + MissingNote(missing));
-    });
-
-    // Forgets Body 1/2, both seal bodies and the green seal so a new O-I seal can be started.
-    // Only the app's references are cleared; the bodies stay in the CATIA part.
-    private void ResetSealing() => RunWithState((_, state) =>
-    {
-        Array.Clear(state.Bodies);
-        Array.Clear(state.Seals);
-        state.Result = null;
-        SetStatus("Started a new O-I seal. Existing bodies stay in CATIA. Set a new Body 1 and Body 2.");
-    });
-
     // ---- Plugs ----
 
+    private const double PlugMm = 2.0;
+
+    // Makes a green plug from the closed chain of curves selected in CATIA.
     private void MakePlug() => RunWithState((doc, state) =>
     {
-        using var selectDialog = new SelectFacesDialog(
-            "plug",
-            "In CATIA, select a closed chain of curves\n" +
-            "(Ctrl+click to select several).\n\n" +
-            "Then click OK.",
-            "Make plug");
-        if (selectDialog.ShowDialog(this) != DialogResult.OK)
-        {
-            SetStatus("Plug creation cancelled.");
-            return;
-        }
-
         List<object> curves = CatiaSeals.GetSelectedCurveReferences(doc);
+        object plug = CatiaSeals.CreatePlugBody(doc, CatiaSeals.NextKey(doc), curves, PlugMm, false);
+        CatiaSeals.SetBodyColor(doc, plug, CatiaSeals.ResultColor);
+        state.Plugs.Add(CatiaBodies.NameOf(plug));
+        SetStatus($"Plug made from {curves.Count} curve(s), {PlugMm} mm. Flip selected plug if it is on the wrong side.");
+    });
 
-        const double defaultThicknessMm = 2.0;
-        object plug = CatiaSeals.CreatePlugBody(doc, CatiaSeals.NextKey(doc), curves, defaultThicknessMm, false);
-        SetStatus("Adjusting plug. Changes update live in CATIA.");
+    private const double SphereRadiusMm = 2.0;
 
-        using var adjustDialog = new AdjustSealDialog(
-            "Plug",
-            defaultThicknessMm,
-            distance => CatiaSeals.SetSealThickness(doc, plug, distance),
-            () => CatiaSeals.FlipSeal(doc, plug));
+    // Makes a green sphere plug centred on the point selected in CATIA.
+    private void MakeSphere() => RunWithState((doc, state) =>
+    {
+        double[] centre = CatiaWatertight.GetSelectedPoint(doc,
+            "Select exactly one point (a vertex or a point feature) for the sphere's centre.");
+        object sphere = CatiaSeals.CreateSphereBody(doc, CatiaSeals.NextKey(doc), centre, SphereRadiusMm);
+        CatiaSeals.SetBodyColor(doc, sphere, CatiaSeals.ResultColor);
+        state.Plugs.Add(CatiaBodies.NameOf(sphere));
+        SetStatus($"Sphere plug {CatiaBodies.NameOf(sphere)} made, {SphereRadiusMm} mm radius.");
+    });
 
-        if (adjustDialog.ShowDialog(this) != DialogResult.OK)
+    private void FlipPlug() => RunWithState((doc, state) =>
+    {
+        object? body = CatiaBodies.GetSelectedBody(doc);
+        string? name = body is null ? null : CatiaBodies.NameOf(body);
+        if (name is null || !(state.Plugs.Contains(name) || state.TestSeals.Contains(name)))
         {
-            CatiaSeals.TryDelete(doc, plug);
-            SetStatus("Plug discarded.");
+            SetStatus("Select a plug or test seal (or one of its faces) in CATIA first.");
             return;
         }
 
-        CatiaSeals.SetBodyColor(doc, plug, CatiaSeals.ResultColor);
-        state.Plugs.Add(new PartState.Plug(CatiaBodies.NameOf(plug), adjustDialog.DistanceMm, adjustDialog.Flipped));
+        CatiaSeals.FlipSeal(doc, body!);
+        SetStatus($"Flipped {name}.");
+    });
 
-        string side = adjustDialog.Flipped ? ", flipped" : "";
-        SetStatus($"Plug created: {curves.Count} curve(s), {adjustDialog.DistanceMm} mm{side}.");
+    // Moves the selected body between plug (green) and test seal (orange). Geometry is unchanged.
+    private void ToggleTestSeal() => RunWithState((doc, state) =>
+    {
+        object? body = CatiaBodies.GetSelectedBody(doc);
+        string? name = body is null ? null : CatiaBodies.NameOf(body);
+        if (name is not null && state.Plugs.Remove(name))
+        {
+            state.TestSeals.Add(name);
+            CatiaSeals.SetBodyColor(doc, body!, CatiaSeals.TestSealColor);
+            SetStatus($"{name} is now an orange test seal.");
+        }
+        else if (name is not null && state.TestSeals.Remove(name))
+        {
+            state.Plugs.Add(name);
+            CatiaSeals.SetBodyColor(doc, body!, CatiaSeals.ResultColor);
+            SetStatus($"{name} is now a green plug.");
+        }
+        else
+        {
+            SetStatus("Select a plug or test seal (or one of its faces) in CATIA first.");
+        }
     });
 
     // ---- Watertight test ----
 
     /// <summary>
-    /// Stores the visible bodies (other than test seals) as the bodies under test, lets the user
-    /// add test seals, then unions isolated copies of the bodies and every test seal and splits
-    /// the union's boundary into shells. The user checks that the flow volume is a shell of its
-    /// own, then cleans up. Clicking again after closing the seal dialog continues the same test.
+    /// Unions isolated copies of the visible bodies and splits the union's boundary into shells.
+    /// A watertight flow volume is a shell of its own; a leak merges it with the outer skin. Only
+    /// the flow volume shell is left shown for inspection. Any previous test is cleaned up first.
     /// State is saved after each step, so Clean up works even after an error or a restart.
     /// </summary>
     private void TestWatertight() => RunWithState((doc, state) =>
     {
-        if (state.WtCopies.Count > 0 || state.WtUnion is not null)
+        if (state.WtFlowPoint is null)
         {
-            SetStatus("A watertight test is already built. Click Clean up test first.");
+            SetStatus("Select a point on the inside surface of the flow volume and click Flow point from selection first.");
             return;
         }
 
-        if (state.WtFlowPoint is null && !AskFlowPoint(doc, state))
-        {
-            SetStatus("Test cancelled: it needs a flow point first.");
-            return;
-        }
+        if (state.WtActive)
+            CleanUpWatertight(doc, state);
 
-        if (state.WtBodies.Count == 0)
-        {
-            state.WtBodies.AddRange(CatiaBodies.GetVisibleBodies(doc).Select(CatiaBodies.NameOf)
-                .Distinct().Except(state.WtPlugs));
-            if (state.WtBodies.Count == 0)
-            {
-                SetStatus("No bodies are visible. Show the bodies to test, then click again.");
-                return;
-            }
-            state.Save();
-        }
-
-        if (!ShowTestSealDialog(doc, state, state.WtBodies.Count))
-        {
-            SetStatus($"Test paused with {state.WtPlugs.Count} test seal(s). " +
-                      "Click Run test to continue, or Clean up test.");
-            return;
-        }
-
-        var (toCopy, missing) = Resolve(doc, state.WtBodies.Concat(state.WtPlugs));
-        if (missing > 0)
-        {
-            SetStatus("Some bodies of the test are missing from the part." + MissingNote(missing));
-            return;
-        }
-
+        state.WtBodies.AddRange(CatiaBodies.GetVisibleBodies(doc).Select(CatiaBodies.NameOf).Distinct());
+        var (toCopy, _) = Resolve(doc, state.WtBodies);
         int empty = toCopy.RemoveAll(CatiaWatertight.IsEmpty);
         string skipped = empty == 0 ? "" : $" Skipped {Bodies(empty)} with no features.";
         if (toCopy.Count == 0)
         {
-            SetStatus("Nothing to test: the stored bodies have no features." + skipped);
+            state.ClearWatertight();
+            SetStatus("Nothing to test: show the bodies to test (with any test seals) first." + skipped);
             return;
         }
+        state.Save();
 
         Progress($"Copying {Bodies(toCopy.Count)}...");
         var (copies, failed) = CatiaWatertight.CopyAsResults(doc, toCopy);
@@ -526,8 +466,8 @@ internal sealed class MainForm : Form
         state.Save();
         if (failed.Count > 0)
         {
-            SetStatus($"Test stopped: CATIA could not copy {string.Join(", ", failed)}. Hide those bodies " +
-                      "(for a test seal: delete it in CATIA, Re-catalogue, make it again), then Clean up test and retry.");
+            SetStatus($"Test stopped: CATIA could not copy {string.Join(", ", failed)}. " +
+                      "Hide or fix those bodies, then run the test again.");
             return;
         }
 
@@ -537,96 +477,45 @@ internal sealed class MainForm : Form
         state.Save();
 
         Progress("Extracting the flow volume shell...");
-        var r = CatiaWatertight.ExtractFlowShell(doc, union, state.WtFlowPoint!);
+        var r = CatiaWatertight.ExtractFlowShell(doc, union, state.WtFlowPoint);
         CatiaWatertight.ShowOnlyShells(doc);
 
-        string summary = $"Flow volume shell: {r.FlowMm2:0} of {r.SkinMm2:0} mm2 of skin, " +
-                         $"in {r.Ms / 1000.0:0.0} s.{skipped}";
         string verdict =
-            r.FlowDistanceMm > 0.01 ? $"The flow point is {r.FlowDistanceMm:0.##} mm from the tested bodies. Use Set flow point to pick a point on the inside surface." :
-            r.FlowMm2 >= r.SkinMm2 * 0.999 ? "LEAK: the flow volume is connected to the outer skin (one shell)." :
-            r.FlowMm2 > r.SkinMm2 - r.FlowMm2 ? "Probably a LEAK: the flow volume shell is larger than all the other shells together." :
-            "Looks WATERTIGHT: the flow volume is a separate shell.";
-        SetStatus($"{verdict} {summary}");
-
-        using var inspect = new SelectFacesDialog("",
-            $"{verdict}\n\n{summary}\nOnly the flow volume shell is shown; check it in CATIA.",
-            "Watertight test - result", okText: "Clean up", cancelText: "Keep");
-        if (inspect.ShowDialog(this) == DialogResult.OK)
-            CleanUpWatertight(doc, state);
-        else
-            SetStatus($"{verdict} Kept for inspection; click Clean up test when done.");
+            r.FlowDistanceMm > 0.01 ? $"The flow point is {r.FlowDistanceMm:0.##} mm from the tested bodies; pick a point on the inside surface." :
+            r.FlowMm2 >= r.SkinMm2 * 0.999 ? "LEAK: the flow volume is connected to the outer skin." :
+            r.FlowMm2 > r.SkinMm2 - r.FlowMm2 ? "Probably a LEAK: the flow volume shell is larger than all other shells together." :
+            "WATERTIGHT: the flow volume is a separate shell.";
+        SetStatus($"{verdict} Flow shell {r.FlowMm2:0} of {r.SkinMm2:0} mm2, {r.Ms / 1000.0:0.0} s.{skipped}");
     });
-
-    // Makes test seals outside a test. They stay until deleted in CATIA (then Re-catalogue).
-    private void MakeTestSeals() => RunWithState((doc, state) =>
-    {
-        int before = state.WtPlugs.Count;
-        ShowTestSealDialog(doc, state, bodies: null);
-        SetStatus($"Made {state.WtPlugs.Count - before} test seal(s); {state.WtPlugs.Count} in total.");
-    });
-
-    // Opens the test seal dialog; every seal made is stored straight away. With bodies set, the
-    // dialog also offers Test and returns true when it is clicked.
-    private bool ShowTestSealDialog(object doc, PartState state, int? bodies)
-    {
-        using var dialog = new TempPlugsDialog(bodies, state.WtPlugs.Count, () =>
-        {
-            string name = CatiaBodies.NameOf(CatiaWatertight.CreateTempPlug(doc));
-            state.WtPlugs.Add(name);
-            state.Save();
-            return name;
-        });
-        return dialog.ShowDialog(this) == DialogResult.OK;
-    }
 
     private void SetFlowPoint() => RunWithState((doc, state) =>
     {
-        if (AskFlowPoint(doc, state))
-            SetStatus("Flow point stored.");
-        else
-            SetStatus(state.WtFlowPoint is null ? "No flow point set." : "Flow point unchanged.");
+        state.WtFlowPoint = CatiaWatertight.GetSelectedPoint(doc,
+            "Select exactly one point (a vertex or a point feature) on the inside surface of the flow volume.");
+        SetStatus("Flow point stored.");
     });
-
-    // Asks for a point on the inside surface of the flow volume and stores it. False if cancelled.
-    private bool AskFlowPoint(object doc, PartState state)
-    {
-        using var dialog = new SelectFacesDialog("",
-            "In CATIA, select one point (a vertex or a point feature)\n" +
-            "on the inside surface of the flow volume.\n\n" +
-            "Then click OK.",
-            "Watertight test - flow point");
-        if (dialog.ShowDialog(this) != DialogResult.OK)
-            return false;
-
-        state.WtFlowPoint = CatiaWatertight.GetSelectedFlowPoint(doc);
-        state.Save();
-        return true;
-    }
 
     private void CleanUpTest() => RunWithState((doc, state) =>
     {
-        CleanUpWatertight(doc, state);
+        bool hadTest = state.WtActive;
+        int shown = CleanUpWatertight(doc, state);
+        SetStatus(hadTest ? $"Watertight test cleaned up; {Bodies(shown)} shown again." : "No watertight test to clean up.");
     });
 
-    // Deletes the shells geoset, the union and the copies, and shows the tested bodies and the
-    // test seals again. Test seals are kept.
-    private void CleanUpWatertight(object doc, PartState state)
+    // Deletes the shells geoset, the union and the copies, and shows the tested bodies again.
+    // Returns how many bodies were shown.
+    private int CleanUpWatertight(object doc, PartState state)
     {
         Progress("Cleaning up the watertight test...");
-        var temporary = new[] { state.WtUnion }.Concat(state.WtCopies).OfType<string>();
-        int deleted = CatiaWatertight.CleanUp(doc, temporary);
+        CatiaWatertight.CleanUp(doc, new[] { state.WtUnion }.Concat(state.WtCopies).OfType<string>());
 
-        var (shown, _) = Resolve(doc, state.WtBodies.Concat(state.WtPlugs));
-        if (state.WtBodies.Count > 0 && shown.Count > 0)
+        var (shown, _) = Resolve(doc, state.WtBodies);
+        if (shown.Count > 0)
             CatiaBodies.ShowExactlyBodies(doc, shown);
 
-        bool hadTest = state.WtActive;
         state.ClearWatertight();
-        SetStatus(deleted == 0 && !hadTest
-            ? "No watertight test to clean up."
-            : $"Watertight test cleaned up: {deleted} temporary item(s) deleted, " +
-              $"{Bodies(shown.Count)} shown (including {state.WtPlugs.Count} test seal(s)).");
+        state.Save();
+        return shown.Count;
     }
 
     // ---- Catalogue ----

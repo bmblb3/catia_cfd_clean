@@ -11,20 +11,18 @@ namespace CATIA_CFD_Clean;
 /// </summary>
 internal sealed class PartState
 {
-    public sealed record Plug(string Name, double Mm, bool Flipped);
-
     private readonly string _dbPath;
 
     public readonly string?[] Bodies = new string?[3]; // O-I Body 1 and 2 (index 0 unused)
     public readonly string?[] Seals = new string?[3];  // their seal-faces bodies
     public string? Result;                             // the green intersected seal
     public readonly List<string> Locked = new();
-    public readonly List<Plug> Plugs = new();
+    public readonly List<string> Plugs = new();        // green plugs
+    public readonly List<string> TestSeals = new();    // plugs turned into orange test seals
 
-    // Watertight test. The flow point (mm, on the inside surface of the flow volume) and the test
-    // seals are kept between tests; the rest belongs to one test and is cleared by Clean up.
+    // Watertight test. The flow point (mm, on the inside surface of the flow volume) is kept
+    // between tests; the rest belongs to one test and is cleared by Clean up.
     public double[]? WtFlowPoint;
-    public readonly List<string> WtPlugs = new();      // test seals (orange plugs), included in every test
     public readonly List<string> WtBodies = new();     // bodies under test (visible when it started)
     public readonly List<string> WtCopies = new();     // isolated copies of bodies and test seals
     public string? WtUnion;                            // body holding the union of the copies
@@ -56,13 +54,9 @@ internal sealed class PartState
                 case "lock":
                     state.Locked.Add(row.Key);
                     break;
-                case "plug":
-                    state.Plugs.Add(new Plug(row.Key,
-                        m.TryGetProperty("mm", out var mm) ? mm.GetDouble() : 0,
-                        m.TryGetProperty("flipped", out var f) && f.GetBoolean()));
-                    break;
+                case "plug": state.Plugs.Add(row.Key); break;
+                case "test_seal" or "wt_plug": state.TestSeals.Add(row.Key); break; // wt_plug: older files
                 case "wt_body": state.WtBodies.Add(row.Key); break;
-                case "wt_plug": state.WtPlugs.Add(row.Key); break;
                 case "wt_copy": state.WtCopies.Add(row.Key); break;
                 case "wt" when row.Key == "union": state.WtUnion = name; break;
                 case "wt" when row.Key == "flow_point":
@@ -95,14 +89,14 @@ internal sealed class PartState
         Result = Keep(Result);
         WtUnion = Keep(WtUnion);
         dropped += Locked.RemoveAll(n => !existing.Contains(n));
-        dropped += Plugs.RemoveAll(p => !existing.Contains(p.Name));
+        dropped += Plugs.RemoveAll(n => !existing.Contains(n));
+        dropped += TestSeals.RemoveAll(n => !existing.Contains(n));
         dropped += WtBodies.RemoveAll(n => !existing.Contains(n));
-        dropped += WtPlugs.RemoveAll(n => !existing.Contains(n));
         dropped += WtCopies.RemoveAll(n => !existing.Contains(n));
         return dropped;
     }
 
-    // Forgets the current test. Test seals and the flow point are kept.
+    // Forgets the current test. The flow point is kept.
     public void ClearWatertight()
     {
         WtBodies.Clear();
@@ -128,13 +122,13 @@ internal sealed class PartState
         }
         foreach (string name in Locked)
             yield return new("lock", name, "{}");
-        foreach (var p in Plugs)
-            yield return new("plug", p.Name, JsonSerializer.Serialize(new { mm = p.Mm, flipped = p.Flipped }));
+        foreach (string name in Plugs)
+            yield return new("plug", name, "{}");
+        foreach (string name in TestSeals)
+            yield return new("test_seal", name, "{}");
 
         foreach (string name in WtBodies)
             yield return new("wt_body", name, "{}");
-        foreach (string name in WtPlugs)
-            yield return new("wt_plug", name, "{}");
         foreach (string name in WtCopies)
             yield return new("wt_copy", name, "{}");
         if (WtUnion is not null)
