@@ -140,6 +140,7 @@ internal static class CatiaSeals
     }
 
     public const string PlugFillGeosetName = "Plug fill";
+    private const double PlugExtrapolateMm = 0.5;
 
     public static bool IsHelperGeoset(string name) =>
         name == SealFacesGeosetName || name == PlugFillGeosetName;
@@ -164,7 +165,8 @@ internal static class CatiaSeals
     }
 
     // Creates a new body with a hidden geoset holding a Fill of the closed curve chain,
-    // and a thick surface of that fill in the body: distanceMm on one side, otherSideMm on the other.
+    // extrapolated 0.5 mm past its boundary, and a thick surface of that in the body:
+    // distanceMm on one side, otherSideMm on the other.
     public static object CreatePlugBody(dynamic doc, string name, IReadOnlyList<object> curves,
         double distanceMm, bool reverse, double otherSideMm = 0.0)
     {
@@ -200,9 +202,25 @@ internal static class CatiaSeals
             part.InWorkObject = geoset;
             part.Update();
 
+            // Grow the fill past its boundary so the plug overlaps the surrounding walls.
             dynamic fillRef = part.CreateReferenceFromObject(fill);
+            dynamic fillEdge = hsf.AddNewBoundaryOfSurface(fillRef);
+            geoset.AppendHybridShape(fillEdge);
+            part.InWorkObject = geoset;
+            part.Update();
+
+            dynamic extrapol = hsf.AddNewExtrapolLength(
+                part.CreateReferenceFromObject(fillEdge), fillRef, PlugExtrapolateMm);
+            extrapol.ContinuityType = 1; // tangent
+            extrapol.PropagationMode = 1; // tangency propagation, whole closed boundary
+            extrapol.SetAssemble(true); // "Assemble result": fill + extension as one surface
+            geoset.AppendHybridShape(extrapol);
+            part.InWorkObject = geoset;
+            part.Update();
+
+            dynamic plugSurfaceRef = part.CreateReferenceFromObject(extrapol);
             part.InWorkObject = newBody;
-            dynamic thick = part.ShapeFactory.AddNewThickSurface(fillRef, 0, distanceMm, otherSideMm);
+            dynamic thick = part.ShapeFactory.AddNewThickSurface(plugSurfaceRef, 0, distanceMm, otherSideMm);
             if (reverse)
                 thick.swap_OffsetSide();
             part.Update();
