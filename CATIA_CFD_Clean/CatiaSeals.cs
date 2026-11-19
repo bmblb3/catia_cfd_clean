@@ -108,6 +108,35 @@ internal static class CatiaSeals
     }
 
     /// <summary>
+    /// Creates a red seal body that is a copy of the whole of <paramref name="source"/>: its solid
+    /// is pasted as a result without link, so the later intersect consumes the copy, not the
+    /// original. The copy counts as already thickened.
+    /// </summary>
+    public static object CreateSealCopyBody(dynamic doc, string name, object source)
+    {
+        dynamic part = doc.Part;
+        dynamic bodies = part.Bodies;
+        int before = bodies.Count;
+
+        dynamic selection = doc.Selection;
+        selection.Clear();
+        selection.Add(source);
+        selection.Copy();
+        selection.Clear();
+        selection.Add(part);
+        selection.PasteSpecial("CATPrtResultWithOutLink");
+        selection.Clear();
+        part.Update();
+
+        if ((int)bodies.Count != before + 1)
+            throw new InvalidOperationException("Could not copy the body as a seal.");
+        dynamic newBody = bodies.Item(before + 1);
+        newBody.Name = name;
+        SetBodyColor(doc, newBody, ConfirmedColor);
+        return newBody;
+    }
+
+    /// <summary>
     /// True once the seal body has its thick surface.
     /// </summary>
     public static bool IsThickened(object sealBody) => (int)((dynamic)sealBody).Shapes.Count > 0;

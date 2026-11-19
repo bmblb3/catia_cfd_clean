@@ -52,8 +52,10 @@ internal sealed class MainForm : Form
             "Starts a new O-I seal: the previous red and green seals are forgotten (nothing is deleted)."), 0);
         AddSpanning(seal, MakeButton("Cycle O-I bodies: 1, both, 2, none", CycleBodies,
             "Each click moves to the next: only Body 1, both, only Body 2, neither."), 1);
-        AddSpanning(seal, MakeButton("Seal faces from selection", SelectSealFaces,
-            "Stores the selected faces as the red seal of Body 1 or Body 2 (whichever owns them)."), 2);
+        seal.Controls.Add(MakeButton("Seal faces from selection", SelectSealFaces,
+            "Stores the selected faces as the red seal of Body 1 or Body 2 (whichever owns them)."), 0, 2);
+        seal.Controls.Add(MakeButton("Seal body from selection", SelectSealBody,
+            "Copies the whole of Body 1 or Body 2 (select it or one of its faces) as its red seal."), 1, 2);
         AddSpanning(seal, MakeButton("Make green seal", MakeSeal,
             "Thickens both red seals, then intersects them into the green seal."), 3);
         seal.Controls.Add(MakeButton("Plug from selection", MakePlug,
@@ -304,15 +306,50 @@ internal sealed class MainForm : Form
 
         var (owner, faces) = CatiaSeals.GetSelectedFaces(doc);
         string ownerName = CatiaBodies.NameOf(owner);
-        int slot = state.Bodies[2] == ownerName ? 2 : state.Bodies[1] == ownerName ? 1 : 0;
+        int slot = SlotOf(state, ownerName);
         if (slot == 0)
         {
             SetStatus($"The selected faces belong to {ownerName}, which is not set as Body 1 or Body 2.");
             return;
         }
 
+        StoreSeal(doc, state, slot, CatiaSeals.CreateSealFacesBody(doc, CatiaSeals.NextKey(doc), faces),
+            $"Stored {faces.Count} seal face(s) for Body {slot}.");
+    });
+
+    // Takes Body 1 or Body 2 (selected, or one of its faces) and copies the whole of it as that
+    // body's red seal. Make green seal uses the copy as it is, without thickening.
+    private void SelectSealBody() => RunWithState((doc, state) =>
+    {
+        if (state.Bodies[1] is null && state.Bodies[2] is null)
+        {
+            SetStatus("Set the O-I bodies first.");
+            return;
+        }
+
+        var names = CatiaBodies.GetBodiesOfSelection(doc).Select(CatiaBodies.NameOf).Distinct().ToList();
+        var slots = names.Select(n => SlotOf(state, n)).Where(s => s != 0).Distinct().ToList();
+        if (slots.Count != 1)
+        {
+            SetStatus(slots.Count == 0
+                ? "Select Body 1 or Body 2 (or one of its faces) in CATIA first."
+                : "The selection covers both Body 1 and Body 2. Select only one of them.");
+            return;
+        }
+
+        int slot = slots[0];
+        object source = CatiaBodies.FindBody(doc, state.Bodies[slot])!;
+        StoreSeal(doc, state, slot, CatiaSeals.CreateSealCopyBody(doc, CatiaSeals.NextKey(doc), source),
+            $"Copied the whole of Body {slot} as its red seal.");
+    });
+
+    private static int SlotOf(PartState state, string bodyName) =>
+        state.Bodies[2] == bodyName ? 2 : state.Bodies[1] == bodyName ? 1 : 0;
+
+    // Stores a new seal body for the slot, deleting the one it replaces.
+    private void StoreSeal(object doc, PartState state, int slot, object sealBody, string done)
+    {
         string? previous = state.Seals[slot];
-        object sealBody = CatiaSeals.CreateSealFacesBody(doc, CatiaSeals.NextKey(doc), faces);
         state.Seals[slot] = CatiaBodies.NameOf(sealBody);
         if (previous is not null)
         {
@@ -323,10 +360,10 @@ internal sealed class MainForm : Form
 
         int other = 3 - slot;
         string next = state.Seals[other] is null
-            ? $"Now select the seal faces of Body {other}."
+            ? $"Now select the seal faces (or seal body) of Body {other}."
             : "Click Make green seal.";
-        SetStatus($"Stored {faces.Count} seal face(s) for Body {slot}. {next}");
-    });
+        SetStatus($"{done} {next}");
+    }
 
     // Thickens each seal body that is not thickened yet (red), then intersects the two (green).
     private void MakeSeal() => RunWithState((doc, state) =>
