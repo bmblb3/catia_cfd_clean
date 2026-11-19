@@ -141,31 +141,45 @@ internal static class CatiaSeals
     /// </summary>
     public static bool IsThickened(object sealBody) => (int)((dynamic)sealBody).Shapes.Count > 0;
 
+    // Smallest thickness either side is reduced to when a thickening fails.
+    public const double SealMinMm = 0.1;
+
     /// <summary>
     /// Thickens the joined faces of a seal body (<see cref="SealMainSideMm"/> on the normal side,
-    /// <see cref="SealReverseSideMm"/> on the other) and colours the body red.
+    /// <see cref="SealReverseSideMm"/> on the other) and colours the body red. If the thickening
+    /// fails, both sides are halved (each no lower than <see cref="SealMinMm"/>) and it is tried
+    /// again, until both sides are at the minimum. Returns the thicknesses that worked.
     /// </summary>
-    public static void ThickenSeal(dynamic doc, object sealBody)
+    public static (double MainMm, double ReverseMm) ThickenSeal(dynamic doc, object sealBody)
     {
         dynamic part = doc.Part;
         dynamic body = sealBody;
         dynamic geoset = body.HybridBodies.Item(SealFacesGeosetName);
         dynamic surface = geoset.HybridShapes.Item(1);
-
         dynamic surfaceRef = part.CreateReferenceFromObject(surface);
-        part.InWorkObject = body;
-        dynamic thick = part.ShapeFactory.AddNewThickSurface(surfaceRef, 0, SealMainSideMm, SealReverseSideMm);
-        try
+
+        double main = SealMainSideMm, reverse = SealReverseSideMm;
+        while (true)
         {
-            part.Update();
-        }
-        catch
-        {
-            TryDelete(doc, thick); // leave the body unthickened so Make green seal can be retried
-            throw;
+            part.InWorkObject = body;
+            dynamic thick = part.ShapeFactory.AddNewThickSurface(surfaceRef, 0, main, reverse);
+            try
+            {
+                part.Update();
+                break;
+            }
+            catch
+            {
+                TryDelete(doc, thick); // leave the body unthickened so Make green seal can be retried
+                if (main <= SealMinMm && reverse <= SealMinMm)
+                    throw;
+                main = Math.Max(main / 2, SealMinMm);
+                reverse = Math.Max(reverse / 2, SealMinMm);
+            }
         }
 
         SetBodyColor(doc, sealBody, ConfirmedColor);
+        return (main, reverse);
     }
 
     public const string PlugFillGeosetName = "Plug fill";

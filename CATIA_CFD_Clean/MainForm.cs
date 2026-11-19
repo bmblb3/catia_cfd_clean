@@ -382,13 +382,16 @@ internal sealed class MainForm : Form
             return;
         }
 
+        var reduced = new List<string>();
         foreach (var (slot, sealBody) in new[] { (1, seal1), (2, seal2) })
         {
             if (CatiaSeals.IsThickened(sealBody))
                 continue;
             try
             {
-                CatiaSeals.ThickenSeal(doc, sealBody);
+                var (main, reverse) = CatiaSeals.ThickenSeal(doc, sealBody);
+                if (main != CatiaSeals.SealMainSideMm || reverse != CatiaSeals.SealReverseSideMm)
+                    reduced.Add($"Body {slot} reduced to {main:0.###} mm / {reverse:0.###} mm");
             }
             catch (Exception ex)
             {
@@ -398,8 +401,9 @@ internal sealed class MainForm : Form
         }
 
         state.Result = CatiaBodies.NameOf(CatiaSeals.MakeSeal(doc, seal1, seal2));
-        SetStatus($"Seal made: both seals thickened ({CatiaSeals.SealMainSideMm} mm / " +
-            $"{CatiaSeals.SealReverseSideMm} mm reversed) and intersected into a green body.");
+        SetStatus($"Seal made: red seals ({CatiaSeals.SealMainSideMm} mm / " +
+            $"{CatiaSeals.SealReverseSideMm} mm reversed) intersected into a green body." +
+            (reduced.Count > 0 ? $" Thickening failed at full size: {string.Join("; ", reduced)}." : ""));
     });
 
     // ---- Plugs ----
