@@ -379,7 +379,7 @@ internal sealed class MainForm : Form
         SetStatus($"Plug made from {curves.Count} curve(s), {PlugMm} mm. Flip selected plug if it is on the wrong side.");
     });
 
-    private const double SphereRadiusMm = 2.0;
+    private const double SphereRadiusMm = 1.0;
 
     // Makes a green sphere plug centred on the point selected in CATIA.
     private void MakeSphere() => RunWithState((doc, state) =>
